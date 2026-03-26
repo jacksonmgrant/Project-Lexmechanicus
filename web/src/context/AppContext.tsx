@@ -3,7 +3,7 @@ import { getOrCreateStoredValue, getStoredValue, setStoredValue } from '../lib/s
 
 type SessionInfo = {
     authenticated: boolean
-    user: { id: number, email: string, created_at: string | null } | null
+    user: { id: number, email: string, display_name?: string | null, created_at: string | null } | null
     free_usage?: {
         limit: number
         used: number
@@ -40,7 +40,7 @@ type AppContextValue = {
     defaultFolderId: number
     refreshSession: () => Promise<void>
     login: (email: string, password: string) => Promise<string>
-    signup: (email: string, password: string) => Promise<string>
+    signup: (displayName: string, email: string, password: string) => Promise<string>
     logout: () => void
     changePassword: (currentPassword: string, newPassword: string) => Promise<string>
     listFiles: (scope: FileScope, query?: string, gameSystemId?: number) => Promise<ListedFile[]>
@@ -52,7 +52,7 @@ type AppContextValue = {
 const AppContext = React.createContext<AppContextValue | null>(null)
 
 function buildSseLines(rawEvent: string) {
-    const lines = rawEvent.split('\n')
+    const lines = rawEvent.split(/\r?\n/)
     let eventName = 'message'
     const dataLines: string[] = []
     for (const line of lines) {
@@ -93,7 +93,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setToken(nextToken)
     }, [])
 
-    const authenticate = React.useCallback(async (path: '/auth/login' | '/auth/signup', email: string, password: string) => {
+    const authenticate = React.useCallback(async (path: '/auth/login', email: string, password: string) => {
         const response = await fetch(`${apiBase}${path}`, {
             method: 'POST',
             headers: {
@@ -106,7 +106,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (!response.ok) throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Unable to authenticate.')
         storeToken(payload.access_token || '')
         setSession({ authenticated: true, user: payload.user })
-        return path === '/auth/signup' ? 'Account created.' : 'Signed in.'
+        return 'Signed in.'
+    }, [apiBase, guestId, storeToken])
+
+    const signup = React.useCallback(async (displayName: string, email: string, password: string) => {
+        const response = await fetch(`${apiBase}/auth/signup`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Guest-Id': guestId,
+            },
+            body: JSON.stringify({ display_name: displayName, email, password }),
+        })
+        const payload = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Unable to authenticate.')
+        storeToken(payload.access_token || '')
+        setSession({ authenticated: true, user: payload.user })
+        return 'Account created.'
     }, [apiBase, guestId, storeToken])
 
     const listFiles = React.useCallback(async (scope: FileScope, query = '', gameSystemId?: number) => {
@@ -178,6 +194,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         while (true) {
             const { done, value } = await reader.read()
             buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+            buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 
             let boundary = buffer.indexOf('\n\n')
             while (boundary >= 0) {
@@ -205,7 +222,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         defaultFolderId,
         refreshSession,
         login: (email, password) => authenticate('/auth/login', email, password),
-        signup: (email, password) => authenticate('/auth/signup', email, password),
+        signup,
         logout: () => {
             storeToken('')
             setSession((current) => current ? { authenticated: false, user: null, free_usage: current.free_usage } : null)
@@ -224,6 +241,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         defaultFolderId,
         refreshSession,
         authenticate,
+        signup,
         storeToken,
         changePassword,
         listFiles,

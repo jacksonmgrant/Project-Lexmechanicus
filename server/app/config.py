@@ -1,6 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
+
+
+def _default_jwt_secret() -> str:
+    project_root = Path(__file__).resolve().parents[1]
+    seed = f"lexmechanicus-dev:{project_root}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+def _resolve_jwt_secret() -> str:
+    configured = (os.getenv("JWT_SECRET") or "").strip()
+    if configured and configured.lower() not in {"change-me", "changeme", "dev-secret"} and len(configured) >= 32:
+        return configured
+    return _default_jwt_secret()
 
 
 class Settings:
@@ -18,7 +33,7 @@ class Settings:
     FEATURE_AUTO_ESCALATE = bool(int(os.getenv("FEATURE_AUTO_ESCALATE", "1")))
     RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
     RATE_LIMIT_PER_DAY = int(os.getenv("RATE_LIMIT_PER_DAY", "1000"))
-    JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
+    JWT_SECRET = _resolve_jwt_secret()
     ACCESS_TOKEN_TTL_HOURS = int(os.getenv("ACCESS_TOKEN_TTL_HOURS", "72"))
     GUEST_ID_HEADER = os.getenv("GUEST_ID_HEADER", "X-Guest-Id")
     FREE_TOKENS_PER_HOUR = int(os.getenv("FREE_TOKENS_PER_HOUR", "1200"))

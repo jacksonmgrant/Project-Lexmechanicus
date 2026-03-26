@@ -17,6 +17,7 @@ export function UploadPage() {
     const [description, setDescription] = useState('')
     const [isPublic, setIsPublic] = useState(false)
     const [isSubmitting, setIsSubmitting] = useState(false)
+    const [error, setError] = useState('')
 
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFiles = Array.from(event.target.files || [])
@@ -43,14 +44,18 @@ export function UploadPage() {
     const handleSubmit = async () => {
         if (files.length === 0 || !title || isSubmitting) return
 
+        setError('')
         setIsSubmitting(true)
         for (const file of files) {
             setFiles((prev) => prev.map((item) => (item.id === file.id ? { ...item, status: 'uploading' } : item)))
             try {
                 await uploadFile(file.source, isPublic)
                 setFiles((prev) => prev.map((item) => (item.id === file.id ? { ...item, status: 'complete' } : item)))
-            } catch {
-                setFiles((prev) => prev.filter((item) => item.id !== file.id))
+            } catch (err) {
+                setFiles((prev) => prev.map((item) => (item.id === file.id ? { ...item, status: 'complete' } : item)))
+                setError(err instanceof Error ? err.message : `Unable to upload ${file.name}.`)
+                setIsSubmitting(false)
+                return
             }
         }
         setTitle('')
@@ -144,6 +149,12 @@ export function UploadPage() {
                             </div>
                         </div>
                     </section>
+
+                    {!!error && (
+                        <div className="empty-state">
+                            <p>{error}</p>
+                        </div>
+                    )}
 
                     <button type="button" onClick={handleSubmit} disabled={files.length === 0 || !title || isSubmitting} className="primary-button primary-button--full">
                         {isSubmitting ? 'Uploading Files...' : 'Upload Files'}

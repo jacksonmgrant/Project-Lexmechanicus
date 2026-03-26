@@ -17,7 +17,7 @@ setup(
         "orjson",
         "sse-starlette",
         "httpx",
-        "passlib[bcrypt]",
+        "bcrypt",
         "pyjwt",
         "alembic",
         "pypdf",

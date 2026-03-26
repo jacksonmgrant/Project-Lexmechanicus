@@ -2,15 +2,75 @@ import { useEffect, useState } from 'react'
 import { Bell, Database, Key, User } from 'lucide-react'
 import { useAppContext } from '../../context/AppContext'
 
+function EyeIcon({ hidden }: { hidden: boolean }) {
+    return hidden ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+                fill="currentColor"
+                d="M2,5.27L3.28,4L20,20.72L18.73,22L15.65,18.92C14.5,19.3 13.28,19.5 12,19.5C7,19.5 2.73,16.39 1,12C1.69,10.24 2.79,8.69 4.19,7.46L2,5.27M12,9A3,3 0 0,1 15,12C15,12.35 14.94,12.69 14.83,13L11,9.17C11.31,9.06 11.65,9 12,9M12,4.5C17,4.5 21.27,7.61 23,12C22.44,13.43 21.6,14.69 20.57,15.75L16.58,11.76C16.86,8.8 14.68,6.14 11.72,5.85C10.2,5.71 8.7,6.2 7.56,7.19L5.6,5.23C7.38,4.76 9.18,4.5 12,4.5Z"
+            />
+        </svg>
+    ) : (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+                fill="currentColor"
+                d="M12,4.5C17,4.5 21.27,7.61 23,12C21.27,16.39 17,19.5 12,19.5C7,19.5 2.73,16.39 1,12C2.73,7.61 7,4.5 12,4.5M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z"
+            />
+        </svg>
+    )
+}
+
+type PasswordFieldProps = {
+    id: string
+    label: string
+    value: string
+    hidden: boolean
+    placeholder?: string
+    onChange: (value: string) => void
+    onToggle: () => void
+}
+
+function PasswordField({ id, label, value, hidden, placeholder, onChange, onToggle }: PasswordFieldProps) {
+    return (
+        <div className="field-group">
+            <label htmlFor={id}>{label}</label>
+            <div className="password-input-wrap">
+                <input
+                    id={id}
+                    type={hidden ? 'password' : 'text'}
+                    placeholder={placeholder}
+                    value={value}
+                    onChange={(event) => onChange(event.target.value)}
+                    className="text-input text-input--with-password-toggle"
+                />
+                <button
+                    type="button"
+                    className="password-toggle"
+                    onClick={onToggle}
+                    aria-label={hidden ? `Show ${label.toLowerCase()}` : `Hide ${label.toLowerCase()}`}
+                    aria-pressed={!hidden}
+                >
+                    <EyeIcon hidden={hidden} />
+                </button>
+            </div>
+        </div>
+    )
+}
+
 export function AccountPage() {
     const { changePassword, listFiles, login, logout, session, signup } = useAppContext()
     const [email, setEmail] = useState(session?.user?.email || '')
+    const [displayName, setDisplayName] = useState(session?.user?.display_name || '')
     const [authPassword, setAuthPassword] = useState('')
+    const [isAuthPasswordHidden, setIsAuthPasswordHidden] = useState(true)
     const [mode, setMode] = useState<'login' | 'signup'>('login')
     const [currentPassword, setCurrentPassword] = useState('')
+    const [isCurrentPasswordHidden, setIsCurrentPasswordHidden] = useState(true)
     const [newPassword, setNewPassword] = useState('')
+    const [isNewPasswordHidden, setIsNewPasswordHidden] = useState(true)
     const [confirmPassword, setConfirmPassword] = useState('')
-    const [notifications, setNotifications] = useState(true)
+    const [isConfirmPasswordHidden, setIsConfirmPasswordHidden] = useState(true)
+    const [notifications, setNotifications] = useState(false)
     const [message, setMessage] = useState('')
     const [storageBytes, setStorageBytes] = useState(0)
 
@@ -27,11 +87,14 @@ export function AccountPage() {
     useEffect(() => {
         if (!session?.authenticated) return
         setEmail(session.user?.email || '')
+        setDisplayName(session.user?.display_name || '')
     }, [session])
 
     const handleAuth = async () => {
         try {
-            const result = mode === 'login' ? await login(email, authPassword) : await signup(email, authPassword)
+            const result = mode === 'login'
+                ? await login(email, authPassword)
+                : await signup(displayName, email, authPassword)
             setMessage(result)
             setAuthPassword('')
         } catch (error) {
@@ -71,14 +134,30 @@ export function AccountPage() {
                                 <h2>{mode === 'login' ? 'Sign In' : 'Create Account'}</h2>
                             </div>
                             <div className="form-stack">
+                                {mode === 'signup' && (
+                                    <div className="field-group">
+                                        <label htmlFor="account-display-name">Display Name</label>
+                                        <input
+                                            id="account-display-name"
+                                            type="text"
+                                            value={displayName}
+                                            onChange={(event) => setDisplayName(event.target.value)}
+                                            className="text-input"
+                                        />
+                                    </div>
+                                )}
                                 <div className="field-group">
                                     <label htmlFor="account-email">Email Address</label>
                                     <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="text-input" />
                                 </div>
-                                <div className="field-group">
-                                    <label htmlFor="account-password">Password</label>
-                                    <input id="account-password" type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} className="text-input" />
-                                </div>
+                                <PasswordField
+                                    id="account-password"
+                                    label="Password"
+                                    value={authPassword}
+                                    hidden={isAuthPasswordHidden}
+                                    onChange={setAuthPassword}
+                                    onToggle={() => setIsAuthPasswordHidden((current) => !current)}
+                                />
                                 <div className="button-row">
                                     <button type="button" className="primary-button primary-button--inline" onClick={handleAuth}>
                                         {mode === 'login' ? 'Sign In' : 'Create Account'}
@@ -100,7 +179,7 @@ export function AccountPage() {
                             <div className="form-stack">
                                 <div className="field-group">
                                     <label htmlFor="name">Display Name</label>
-                                    <input id="name" value={session.user?.email?.split('@')[0] || 'User'} readOnly className="text-input" />
+                                    <input id="name" value={session.user?.display_name || session.user?.email?.split('@')[0] || 'User'} readOnly className="text-input" />
                                 </div>
                                 <div className="field-group">
                                     <label htmlFor="email">Email Address</label>
@@ -119,18 +198,33 @@ export function AccountPage() {
                             <h2>Security</h2>
                         </div>
                         <div className="form-stack">
-                            <div className="field-group">
-                                <label htmlFor="current-password">Current Password</label>
-                                <input id="current-password" type="password" placeholder="••••••••" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="text-input" />
-                            </div>
-                            <div className="field-group">
-                                <label htmlFor="new-password">New Password</label>
-                                <input id="new-password" type="password" placeholder="••••••••" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="text-input" />
-                            </div>
-                            <div className="field-group">
-                                <label htmlFor="confirm-password">Confirm New Password</label>
-                                <input id="confirm-password" type="password" placeholder="••••••••" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="text-input" />
-                            </div>
+                            <PasswordField
+                                id="current-password"
+                                label="Current Password"
+                                value={currentPassword}
+                                hidden={isCurrentPasswordHidden}
+                                placeholder="••••••••"
+                                onChange={setCurrentPassword}
+                                onToggle={() => setIsCurrentPasswordHidden((current) => !current)}
+                            />
+                            <PasswordField
+                                id="new-password"
+                                label="New Password"
+                                value={newPassword}
+                                hidden={isNewPasswordHidden}
+                                placeholder="••••••••"
+                                onChange={setNewPassword}
+                                onToggle={() => setIsNewPasswordHidden((current) => !current)}
+                            />
+                            <PasswordField
+                                id="confirm-password"
+                                label="Confirm New Password"
+                                value={confirmPassword}
+                                hidden={isConfirmPasswordHidden}
+                                placeholder="••••••••"
+                                onChange={setConfirmPassword}
+                                onToggle={() => setIsConfirmPasswordHidden((current) => !current)}
+                            />
                             <button type="button" className="primary-button primary-button--inline" onClick={handlePasswordUpdate} disabled={!session?.authenticated}>
                                 Update Password
                             </button>

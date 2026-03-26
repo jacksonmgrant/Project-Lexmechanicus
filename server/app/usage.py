@@ -28,7 +28,7 @@ class AnonymousUsageGate:
     async def init(self):
         if not self._redis:
             self._redis = await aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-        return self
+        return self._redis
 
     async def _get_key(self, guest_key: str) -> str:
         await self.init()

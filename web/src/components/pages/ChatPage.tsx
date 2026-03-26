@@ -37,34 +37,42 @@ export function ChatPage() {
         }
 
         const assistantId = (Date.now() + 1).toString()
-        setMessages((prev) => [...prev, userMessage, { id: assistantId, role: 'assistant', content: '' }])
+        setMessages((prev) => [...prev, userMessage])
         setInput('')
         setIsLoading(true)
 
         try {
             await streamAsk(userMessage.content, (delta) => {
-                setMessages((prev) =>
-                    prev.map((message) =>
+                setMessages((prev) => {
+                    const assistantMessage = prev.find((message) => message.id === assistantId)
+                    if (!assistantMessage) {
+                        return [...prev, { id: assistantId, role: 'assistant', content: delta }]
+                    }
+
+                    return prev.map((message) =>
                         message.id === assistantId
                             ? { ...message, content: message.content + delta }
                             : message,
-                    ),
-                )
+                    )
+                })
             })
-            setMessages((prev) =>
-                prev.map((message) =>
-                    message.id === assistantId && !message.content
-                        ? { ...message, content: 'No answer was returned for that question.' }
-                        : message,
-                ),
-            )
+            setMessages((prev) => {
+                const assistantMessage = prev.find((message) => message.id === assistantId)
+                if (assistantMessage) return prev
+                return [...prev, { id: assistantId, role: 'assistant', content: 'No answer was returned for that question.' }]
+            })
         } catch (error) {
             const detail = error instanceof Error ? error.message : 'Unable to complete the request.'
-            setMessages((prev) =>
-                prev.map((message) =>
+            setMessages((prev) => {
+                const assistantMessage = prev.find((message) => message.id === assistantId)
+                if (!assistantMessage) {
+                    return [...prev, { id: assistantId, role: 'assistant', content: detail }]
+                }
+
+                return prev.map((message) =>
                     message.id === assistantId ? { ...message, content: detail } : message,
-                ),
-            )
+                )
+            })
         } finally {
             setIsLoading(false)
         }

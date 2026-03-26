@@ -25,6 +25,17 @@ class AuthRequest(BaseModel):
         return normalized
 
 
+class SignupRequest(AuthRequest):
+    display_name: str = Field(min_length=1, max_length=120)
+
+    @validator("display_name")
+    def validate_display_name(cls, value: str):
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Enter a display name.")
+        return normalized
+
+
 class PasswordUpdateRequest(BaseModel):
     current_password: str = Field(min_length=8, max_length=200)
     new_password: str = Field(min_length=8, max_length=200)
@@ -34,6 +45,7 @@ def serialize_user(user: User):
     return {
         "id": user.id,
         "email": user.email,
+        "display_name": user.display_name,
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -50,9 +62,9 @@ async def _build_session_payload(request: Request, user: User | None):
 
 
 @router.post("/signup")
-async def signup(body: AuthRequest):
+async def signup(body: SignupRequest):
     async with SessionLocal() as db:
-        user = await create_user(db, body.email, body.password)
+        user = await create_user(db, body.email, body.password, body.display_name)
     return {
         "access_token": encode_jwt(user.id),
         "token_type": "bearer",

@@ -1,8 +1,10 @@
 from __future__ import annotations
+import base64
+import hashlib
 import time
 
+import bcrypt
 import jwt
-from passlib.hash import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from sqlalchemy import select
@@ -12,14 +14,16 @@ from .config import settings
 
 
 security = HTTPBearer(auto_error=False)
+PASSWORD_HASH_PREFIX = "bcrypt_sha256$"
 
 
-async def create_user(db, email: str, password: str):
+async def create_user(db, email: str, password: str, display_name: str | None = None):
     normalized_email = email.strip().lower()
     existing = await db.scalar(select(User).where(User.email == normalized_email))
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with that email already exists.")
-    u = User(email=normalized_email, password_hash=bcrypt.hash(password))
+    normalized_display_name = display_name.strip() if display_name else None
+    u = User(email=normalized_email, display_name=normalized_display_name or None, password_hash=hash_password(password))
     db.add(u)
     await db.commit()
     await db.refresh(u)
@@ -27,11 +31,18 @@ async def create_user(db, email: str, password: str):
 
 
 def verify_password(password: str, password_hash: str):
-    return bcrypt.verify(password, password_hash)
+    password_bytes = password.encode("utf-8")
+    try:
+        if password_hash.startswith(PASSWORD_HASH_PREFIX):
+            return bcrypt.checkpw(_prehash_password(password_bytes), password_hash.removeprefix(PASSWORD_HASH_PREFIX).encode("utf-8"))
+        return bcrypt.checkpw(password_bytes, password_hash.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def hash_password(password: str):
-    return bcrypt.hash(password)
+    hashed = bcrypt.hashpw(_prehash_password(password.encode("utf-8")), bcrypt.gensalt())
+    return f"{PASSWORD_HASH_PREFIX}{hashed.decode('utf-8')}"
 
 
 async def authenticate_user(db, email: str, password: str):
@@ -39,7 +50,15 @@ async def authenticate_user(db, email: str, password: str):
     user = await db.scalar(select(User).where(User.email == normalized_email))
     if not user or not verify_password(password, user.password_hash):
         return None
+    if not user.password_hash.startswith(PASSWORD_HASH_PREFIX):
+        user.password_hash = hash_password(password)
+        await db.commit()
     return user
+
+
+def _prehash_password(password: bytes) -> bytes:
+    digest = hashlib.sha256(password).digest()
+    return base64.b64encode(digest)
 
 
 def encode_jwt(user_id: int):
