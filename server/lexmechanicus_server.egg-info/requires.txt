@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+SQLAlchemy[asyncio]
+asyncpg
+pgvector
+redis
+aioboto3
+python-multipart
+pydantic
+orjson
+sse-starlette
+httpx
+passlib[bcrypt]
+pyjwt
+alembic
+pypdf
+markdown-it-py

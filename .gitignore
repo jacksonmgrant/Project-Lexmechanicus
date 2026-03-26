@@ -1,0 +1,18 @@
+.env
+
+# Local knowledge workspace for uploads and vector store prep
+knowledge/*
+!knowledge/.gitkeep
+!knowledge/README.md
+!knowledge/rules/
+!knowledge/templates/
+!knowledge/examples/
+!knowledge/uploads/
+knowledge/rules/*
+!knowledge/rules/.gitkeep
+knowledge/templates/*
+!knowledge/templates/.gitkeep
+knowledge/examples/*
+!knowledge/examples/.gitkeep
+knowledge/uploads/*
+!knowledge/uploads/.gitkeep
