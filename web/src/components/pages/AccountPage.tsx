@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Bell, Database, Key, User } from 'lucide-react'
 import { useAppContext } from '../../context/AppContext'
+import { getErrorMessage } from '../../lib/api'
 
 function EyeIcon({ hidden }: { hidden: boolean }) {
     return hidden ? (
@@ -42,6 +43,8 @@ function PasswordField({ id, label, value, hidden, placeholder, onChange, onTogg
                     value={value}
                     onChange={(event) => onChange(event.target.value)}
                     className="text-input text-input--with-password-toggle"
+                    minLength={8}
+                    maxLength={200}
                 />
                 <button
                     type="button"
@@ -72,6 +75,7 @@ export function AccountPage() {
     const [isConfirmPasswordHidden, setIsConfirmPasswordHidden] = useState(true)
     const [notifications, setNotifications] = useState(false)
     const [message, setMessage] = useState('')
+    const [messageType, setMessageType] = useState<'error' | 'success'>('success')
     const [storageBytes, setStorageBytes] = useState(0)
 
     useEffect(() => {
@@ -90,31 +94,76 @@ export function AccountPage() {
         setDisplayName(session.user?.display_name || '')
     }, [session])
 
+    const validateEmail = (value: string) => /\S+@\S+\.\S+/.test(value.trim())
+
     const handleAuth = async () => {
+        const normalizedEmail = email.trim()
+        const normalizedDisplayName = displayName.trim()
+        if (!validateEmail(normalizedEmail)) {
+            setMessageType('error')
+            setMessage('Enter a valid email address.')
+            return
+        }
+        if (authPassword.length < 8) {
+            setMessageType('error')
+            setMessage('Passwords must be at least 8 characters long.')
+            return
+        }
+        if (mode === 'signup' && !normalizedDisplayName) {
+            setMessageType('error')
+            setMessage('Enter a display name to create your account.')
+            return
+        }
+
         try {
             const result = mode === 'login'
-                ? await login(email, authPassword)
-                : await signup(displayName, email, authPassword)
+                ? await login(normalizedEmail, authPassword)
+                : await signup(normalizedDisplayName, normalizedEmail, authPassword)
+            setMessageType('success')
             setMessage(result)
             setAuthPassword('')
         } catch (error) {
-            setMessage(error instanceof Error ? error.message : 'Unable to authenticate.')
+            setMessageType('error')
+            setMessage(getErrorMessage(error, 'Unable to authenticate.'))
         }
     }
 
     const handlePasswordUpdate = async () => {
+        if (!session?.authenticated) {
+            setMessageType('error')
+            setMessage('Sign in before updating your password.')
+            return
+        }
+        if (!currentPassword || !newPassword || !confirmPassword) {
+            setMessageType('error')
+            setMessage('Fill in all password fields before updating your password.')
+            return
+        }
+        if (newPassword.length < 8) {
+            setMessageType('error')
+            setMessage('New passwords must be at least 8 characters long.')
+            return
+        }
         if (newPassword !== confirmPassword) {
+            setMessageType('error')
             setMessage('New passwords do not match.')
+            return
+        }
+        if (newPassword === currentPassword) {
+            setMessageType('error')
+            setMessage('Choose a new password that is different from your current password.')
             return
         }
         try {
             const result = await changePassword(currentPassword, newPassword)
+            setMessageType('success')
             setMessage(result)
             setCurrentPassword('')
             setNewPassword('')
             setConfirmPassword('')
         } catch (error) {
-            setMessage(error instanceof Error ? error.message : 'Unable to update your password.')
+            setMessageType('error')
+            setMessage(getErrorMessage(error, 'Unable to update your password.'))
         }
     }
 
@@ -143,12 +192,13 @@ export function AccountPage() {
                                             value={displayName}
                                             onChange={(event) => setDisplayName(event.target.value)}
                                             className="text-input"
+                                            maxLength={120}
                                         />
                                     </div>
                                 )}
                                 <div className="field-group">
                                     <label htmlFor="account-email">Email Address</label>
-                                    <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="text-input" />
+                                    <input id="account-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="text-input" maxLength={255} />
                                 </div>
                                 <PasswordField
                                     id="account-password"
@@ -275,7 +325,7 @@ export function AccountPage() {
                     </section>
 
                     {!!message && (
-                        <div className="empty-state">
+                        <div className={`notice ${messageType === 'error' ? 'notice--error' : 'notice--success'}`} role={messageType === 'error' ? 'alert' : 'status'}>
                             <p>{message}</p>
                         </div>
                     )}

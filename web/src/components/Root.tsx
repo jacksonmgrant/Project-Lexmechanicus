@@ -1,23 +1,28 @@
 import { useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
-import { FileText, FolderOpen, Menu, MessageSquare, Upload, User, X } from 'lucide-react'
+import { FileText, FolderOpen, Menu, MessageSquare, User, X } from 'lucide-react'
+import { useAppContext } from '../context/AppContext'
+import { ActiveGameSystemDropdown } from './ActiveGameSystemDropdown'
 
 const navigation = [
     { name: 'Chat', path: '/', icon: MessageSquare },
-    { name: 'Upload', path: '/upload', icon: Upload },
     { name: 'Browse', path: '/browse', icon: FolderOpen },
     { name: 'Manage', path: '/manage', icon: FileText },
     { name: 'Account', path: '/account', icon: User },
 ]
 
 export function Root() {
+    const { sessionError } = useAppContext()
     const location = useLocation()
     const [open, setOpen] = useState(false)
 
     return (
         <div className="template-shell">
             <div className="template-mobile-header">
-                <h1 className="template-brand-title">Lexmechanicus</h1>
+                <div className="template-brand-cluster">
+                    <ActiveGameSystemDropdown />
+                    <h1 className="template-brand-title">Lexmechanicus</h1>
+                </div>
                 <button className="icon-button icon-button--ghost" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
                     <Menu size={20} />
                 </button>
@@ -56,7 +61,10 @@ export function Root() {
 
             <div className="template-desktop-header">
                 <div className="template-desktop-header__inner">
-                    <h1 className="template-brand-title">Lexmechanicus</h1>
+                    <div className="template-brand-cluster">
+                        <ActiveGameSystemDropdown />
+                        <h1 className="template-brand-title">Lexmechanicus</h1>
+                    </div>
                     <nav className="template-desktop-nav">
                         {navigation.map((item) => {
                             const Icon = item.icon
@@ -73,6 +81,13 @@ export function Root() {
             </div>
 
             <div className="template-shell__content">
+                {sessionError && (
+                    <div className="page-container">
+                        <div className="notice notice--error" role="alert">
+                            <p>{sessionError}</p>
+                        </div>
+                    </div>
+                )}
                 <Outlet />
             </div>
         </div>

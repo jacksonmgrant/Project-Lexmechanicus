@@ -1,6 +1,7 @@
 from __future__ import annotations
 import httpx, json
-from fastapi import HTTPException
+
+from ..errors import raise_api_error
 from ..config import settings
 
 
@@ -46,7 +47,7 @@ def _build_input_items(user: str, context_chunks: list[dict]) -> list[dict]:
 async def stream_completion(model: str, system: str, user: str, context_chunks: list[dict]):
     api_key = settings.OPENAI_API_KEY
     if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is required")
+        raise_api_error(503, "AI responses are not configured right now.", "AI_NOT_CONFIGURED")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload: dict[str, object] = {
         "model": model,
@@ -86,6 +87,12 @@ async def stream_completion(model: str, system: str, user: str, context_chunks: 
                             yield delta
                     elif event_type == "error":
                         message = event.get("message") or "OpenAI streaming error"
-                        raise HTTPException(status_code=502, detail=message)
+                        raise_api_error(502, message, "AI_STREAM_ERROR")
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        if e.response.status_code == 401:
+            raise_api_error(503, "AI responses are unavailable because the provider credentials are invalid.", "AI_AUTH_FAILED")
+        if e.response.status_code == 429:
+            raise_api_error(503, "The AI provider is rate limiting requests right now. Please try again shortly.", "AI_RATE_LIMITED")
+        raise_api_error(502, "The AI provider returned an error while generating a response.", "AI_PROVIDER_ERROR")
+    except httpx.HTTPError:
+        raise_api_error(503, "The AI provider could not be reached. Please try again.", "AI_PROVIDER_UNAVAILABLE")

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Send } from 'lucide-react'
 import { useAppContext } from '../../context/AppContext'
+import { getErrorMessage } from '../../lib/api'
 
 type Message = {
     id: string
@@ -9,16 +10,17 @@ type Message = {
 }
 
 export function ChatPage() {
-    const { streamAsk, session } = useAppContext()
+    const { activeGameSystem, streamAsk, session } = useAppContext()
     const [messages, setMessages] = useState<Message[]>([
         {
             id: '1',
             role: 'assistant',
-            content: "Hello! Welcome to Lexmechanicus, your assistant for game rules. Ask me anything about game rules from uploaded documents.",
+            content: "Hello! Welcome to Lexmechanicus. Ask me anything about the files tied to your current game system.",
         },
     ])
     const [input, setInput] = useState('')
     const [isLoading, setIsLoading] = useState(false)
+    const [error, setError] = useState('')
     const scrollRef = useRef<HTMLDivElement>(null)
 
     useEffect(() => {
@@ -28,17 +30,31 @@ export function ChatPage() {
     }, [messages])
 
     const handleSend = async () => {
-        if (!input.trim() || isLoading) return
+        const normalizedInput = input.trim()
+        if (isLoading) return
+        if (!normalizedInput) {
+            setError('Enter a question before sending.')
+            return
+        }
+        if (!activeGameSystem) {
+            setError('Choose a game system before chatting.')
+            return
+        }
+        if (normalizedInput.length > 500) {
+            setError('Keep your question under 500 characters.')
+            return
+        }
 
         const userMessage: Message = {
             id: Date.now().toString(),
             role: 'user',
-            content: input,
+            content: normalizedInput,
         }
 
         const assistantId = (Date.now() + 1).toString()
         setMessages((prev) => [...prev, userMessage])
         setInput('')
+        setError('')
         setIsLoading(true)
 
         try {
@@ -62,7 +78,8 @@ export function ChatPage() {
                 return [...prev, { id: assistantId, role: 'assistant', content: 'No answer was returned for that question.' }]
             })
         } catch (error) {
-            const detail = error instanceof Error ? error.message : 'Unable to complete the request.'
+            const detail = getErrorMessage(error, 'Unable to complete the request.')
+            setError(detail)
             setMessages((prev) => {
                 const assistantMessage = prev.find((message) => message.id === assistantId)
                 if (!assistantMessage) {
@@ -120,6 +137,7 @@ export function ChatPage() {
                             placeholder="Ask about game rules..."
                             className="chat-textarea"
                             rows={1}
+                            maxLength={500}
                         />
                         <button
                             type="button"
@@ -133,9 +151,14 @@ export function ChatPage() {
                     </div>
                     <p className="page-caption">
                         {session?.authenticated
-                            ? 'Ask questions about game rules from your uploaded documents'
-                            : 'Ask questions as a guest or create an account for upload and search features'}
+                            ? `Using your uploaded and saved files for ${activeGameSystem?.name || 'your selected game system'}`
+                            : `Using public files for ${activeGameSystem?.name || 'your selected game system'}`}
                     </p>
+                    {error && (
+                        <div className="notice notice--error" role="alert">
+                            <p>{error}</p>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field, validator
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
+from sqlalchemy.exc import SQLAlchemyError
 
 from ..auth import authenticate_user, create_user, encode_jwt, get_current_user, get_optional_user, hash_password, verify_password
 from ..db import SessionLocal
+from ..errors import raise_api_error
 from ..models import User
+from ..services.rulesets import get_active_ruleset, serialize_ruleset
 from ..usage import AnonymousUsageGate, resolve_guest_key
 
 
@@ -51,10 +54,26 @@ def serialize_user(user: User):
 
 
 async def _build_session_payload(request: Request, user: User | None):
-    payload = {
-        "authenticated": user is not None,
-        "user": serialize_user(user) if user else None,
-    }
+    try:
+        async with SessionLocal() as db:
+            active_game_system, available_game_systems = await get_active_ruleset(db, user_id=user.id if user else None)
+            if user is not None:
+                await db.commit()
+            serialized_game_systems = [serialize_ruleset(tag) for tag in available_game_systems]
+
+            payload = {
+                "authenticated": user is not None,
+                "user": serialize_user(user) if user else None,
+                "active_game_system": serialize_ruleset(active_game_system),
+                "available_game_systems": [tag for tag in serialized_game_systems if tag is not None],
+            }
+    except SQLAlchemyError:
+        raise_api_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Your session could not be loaded right now.",
+            "SESSION_LOAD_FAILED",
+        )
+
     if user is None:
         guest_key = resolve_guest_key(request)
         payload["free_usage"] = await guest_usage.get_status(guest_key)
@@ -77,9 +96,10 @@ async def login(body: AuthRequest):
     async with SessionLocal() as db:
         user = await authenticate_user(db, body.email, body.password)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password.",
+        raise_api_error(
+            status.HTTP_401_UNAUTHORIZED,
+            "Incorrect email or password.",
+            "INVALID_CREDENTIALS",
         )
     return {
         "access_token": encode_jwt(user.id),
@@ -96,14 +116,23 @@ async def me(request: Request, user=Depends(get_optional_user)):
 @router.post("/password")
 async def update_password(body: PasswordUpdateRequest, user=Depends(get_current_user)):
     if body.current_password == body.new_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a new password.")
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "Choose a new password.", "PASSWORD_REUSE")
     async with SessionLocal() as db:
-        db_user = await db.get(User, user.id)
-        if not db_user or not verify_password(body.current_password, db_user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your current password was incorrect.",
+        try:
+            db_user = await db.get(User, user.id)
+            if not db_user or not verify_password(body.current_password, db_user.password_hash):
+                raise_api_error(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "Your current password was incorrect.",
+                    "CURRENT_PASSWORD_INCORRECT",
+                )
+            db_user.password_hash = hash_password(body.new_password)
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Your password could not be updated right now.",
+                "PASSWORD_UPDATE_FAILED",
             )
-        db_user.password_hash = hash_password(body.new_password)
-        await db.commit()
     return {"status": "ok"}

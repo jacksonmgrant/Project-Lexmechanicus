@@ -8,6 +8,9 @@ export default defineConfig(({ mode }) => {
 
     return {
         envDir: '..',
+        define: {
+            __API_BASE__: JSON.stringify(apiTarget),
+        },
         plugins: [react()],
         css: {
             preprocessorOptions: {

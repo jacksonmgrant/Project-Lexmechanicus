@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Sequence
+
 from sqlalchemy import text
 from ..db import SessionLocal
 
@@ -8,13 +8,30 @@ from ..db import SessionLocal
 
 
 HYBRID_SQL = """
-WITH q AS (
-    SELECT to_tsquery('english', :ts) AS tsq
-), kw AS (
+WITH kw AS (
     SELECT fc.id, fc.file_id, fc.title, fc.section, fc.snippet,
-        ts_rank_cd(to_tsvector('english', fc.snippet), (SELECT tsq FROM q)) AS rank
+        ts_rank_cd(to_tsvector('english', fc.snippet), websearch_to_tsquery('english', :query)) AS rank
     FROM file_chunks fc
-    WHERE to_tsvector('english', fc.snippet) @@ (SELECT tsq FROM q)
+    JOIN files f ON f.id = fc.file_id
+    JOIN folders fo ON fo.id = f.folder_id
+    WHERE to_tsvector('english', fc.snippet) @@ websearch_to_tsquery('english', :query)
+        AND f.ruleset_id = :ruleset_id
+        AND (
+            (:user_id IS NULL AND f.is_public = TRUE)
+            OR (
+                :user_id IS NOT NULL AND (
+                    fo.user_id = :user_id
+                    OR EXISTS (
+                        SELECT 1
+                        FROM marketplace_packs mp
+                        JOIN saved_packs sp ON sp.marketplace_pack_id = mp.id
+                        WHERE
+                            mp.folder_id = f.folder_id
+                            AND sp.user_id = :user_id
+                    )
+                )
+            )
+        )
     ORDER BY rank DESC
     LIMIT :k
 )
@@ -33,10 +50,23 @@ ORDER BY score DESC
 """
 
 
-async def hybrid_retrieve(user_id: int | None, game_system_id: int, query: str, k: int = 12):
-    # NOTE: add user and game_system filters to both CTEs for correctness; omitted for brevity.
-    ts = " & ".join([w for w in query.split() if len(w) > 2])
+async def hybrid_retrieve(user_id: int | None, *, ruleset_ids: list[int], include_all: bool, query: str, k: int = 12):
+    normalized_query = query.strip()
+    if not normalized_query:
+        return []
+    if include_all or len(ruleset_ids) != 1:
+        return []
     async with SessionLocal() as db:
-        rows = (await db.execute(text(HYBRID_SQL), {"ts": ts, "k": k})).mappings().all()
+        rows = (
+            await db.execute(
+                text(HYBRID_SQL),
+                {
+                    "query": normalized_query,
+                    "ruleset_id": ruleset_ids[0],
+                    "user_id": user_id,
+                    "k": k,
+                },
+            )
+        ).mappings().all()
         # Vector rerank can be skipped for speed if needed.
         return [dict(r) for r in rows]

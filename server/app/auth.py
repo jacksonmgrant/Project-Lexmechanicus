@@ -5,10 +5,12 @@ import time
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, status
 from fastapi.security import HTTPBearer
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import select
 from .db import SessionLocal
+from .errors import raise_api_error
 from .models import User
 from .config import settings
 
@@ -19,14 +21,25 @@ PASSWORD_HASH_PREFIX = "bcrypt_sha256$"
 
 async def create_user(db, email: str, password: str, display_name: str | None = None):
     normalized_email = email.strip().lower()
-    existing = await db.scalar(select(User).where(User.email == normalized_email))
+    try:
+        existing = await db.scalar(select(User).where(User.email == normalized_email))
+    except SQLAlchemyError:
+        await db.rollback()
+        raise_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "The account service is temporarily unavailable.", "ACCOUNT_LOOKUP_FAILED")
     if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with that email already exists.")
+        raise_api_error(status.HTTP_409_CONFLICT, "An account with that email already exists.", "EMAIL_ALREADY_REGISTERED")
     normalized_display_name = display_name.strip() if display_name else None
     u = User(email=normalized_email, display_name=normalized_display_name or None, password_hash=hash_password(password))
-    db.add(u)
-    await db.commit()
-    await db.refresh(u)
+    try:
+        db.add(u)
+        await db.commit()
+        await db.refresh(u)
+    except IntegrityError:
+        await db.rollback()
+        raise_api_error(status.HTTP_409_CONFLICT, "An account with that email already exists.", "EMAIL_ALREADY_REGISTERED")
+    except SQLAlchemyError:
+        await db.rollback()
+        raise_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "The account could not be created right now.", "ACCOUNT_CREATE_FAILED")
     return u
 
 
@@ -47,12 +60,19 @@ def hash_password(password: str):
 
 async def authenticate_user(db, email: str, password: str):
     normalized_email = email.strip().lower()
-    user = await db.scalar(select(User).where(User.email == normalized_email))
+    try:
+        user = await db.scalar(select(User).where(User.email == normalized_email))
+    except SQLAlchemyError:
+        await db.rollback()
+        raise_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "The sign-in service is temporarily unavailable.", "AUTH_LOOKUP_FAILED")
     if not user or not verify_password(password, user.password_hash):
         return None
     if not user.password_hash.startswith(PASSWORD_HASH_PREFIX):
         user.password_hash = hash_password(password)
-        await db.commit()
+        try:
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
     return user
 
 
@@ -71,22 +91,32 @@ async def get_optional_user(token=Depends(security)):
         return None
     try:
         payload = jwt.decode(token.credentials, settings.JWT_SECRET, algorithms=["HS256"])
+        user_id = int(payload["sub"])
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Your session is invalid or has expired.",
+        raise_api_error(
+            status.HTTP_401_UNAUTHORIZED,
+            "Your session is invalid or has expired.",
+            "SESSION_INVALID",
         )
     async with SessionLocal() as db:
-        u = await db.get(User, int(payload["sub"]))
+        try:
+            u = await db.get(User, user_id)
+        except SQLAlchemyError:
+            raise_api_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "The authentication service is temporarily unavailable.",
+                "AUTH_SERVICE_UNAVAILABLE",
+            )
         if not u:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found.")
+            raise_api_error(status.HTTP_401_UNAUTHORIZED, "User account not found.", "USER_NOT_FOUND")
         return u
 
 
 async def get_current_user(user=Depends(get_optional_user)):
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Create an account or sign in to use this feature.",
+        raise_api_error(
+            status.HTTP_401_UNAUTHORIZED,
+            "Create an account or sign in to use this feature.",
+            "AUTH_REQUIRED",
         )
     return user

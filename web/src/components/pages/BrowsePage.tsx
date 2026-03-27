@@ -1,31 +1,38 @@
 import { useEffect, useState } from 'react'
 import { Download, Eye, Search } from 'lucide-react'
 import { useAppContext, type ListedFile } from '../../context/AppContext'
+import { getErrorMessage } from '../../lib/api'
+import { useDebouncedValue } from '../../lib/useDebouncedValue'
 
 export function BrowsePage() {
-    const { listFiles, defaultGameSystemId, apiBase } = useAppContext()
+    const { listFiles, activeGameSystem, apiBase } = useAppContext()
     const [search, setSearch] = useState('')
+    const debouncedSearch = useDebouncedValue(search, 300)
     const [filteredRules, setFilteredRules] = useState<ListedFile[]>([])
     const [error, setError] = useState('')
 
     useEffect(() => {
-        listFiles('browse', search, defaultGameSystemId)
+        if (!activeGameSystem?.id) {
+            setFilteredRules([])
+            return
+        }
+        listFiles('browse', debouncedSearch, activeGameSystem?.id)
             .then((files) => {
                 setFilteredRules(files)
                 setError('')
             })
             .catch((err) => {
                 setFilteredRules([])
-                setError(err instanceof Error ? err.message : 'Unable to load files.')
+                setError(getErrorMessage(err, 'Unable to load files.'))
             })
-    }, [defaultGameSystemId, listFiles, search])
+    }, [activeGameSystem?.id, debouncedSearch, listFiles])
 
     return (
         <div className="page-scroll">
             <div className="page-container page-container--wide">
                 <div className="page-header">
                     <h1>Browse Game Rules</h1>
-                    <p>Explore rulebooks and documents uploaded by the community.</p>
+                    <p>Explore rulebooks and documents for {activeGameSystem?.name || 'your selected game system'}.</p>
                 </div>
 
                 <div className="search-field">
@@ -35,6 +42,7 @@ export function BrowsePage() {
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
                         className="text-input text-input--with-icon"
+                        maxLength={200}
                     />
                 </div>
 
@@ -44,17 +52,22 @@ export function BrowsePage() {
                             <div className="browse-card__main">
                                 <h3>{rule.title}</h3>
                                 <p className="browse-card__description">
-                                    {rule.mime_type} document from folder {rule.folder_id} with {rule.chunk_count} indexed chunks.
+                                    {rule.description || rule.filename}
                                 </p>
                                 <div className="tag-list">
-                                    <span className="tag-badge">Game System {rule.game_system_id}</span>
+                                    {rule.game_system && (
+                                        <span className="tag-badge tag-badge--game-system">{rule.game_system.name}</span>
+                                    )}
+                                    {rule.tags.map((tag) => (
+                                        <span key={tag.id} className="tag-badge">{tag.name}</span>
+                                    ))}
                                     <span className="tag-badge">{rule.is_public ? 'Public' : 'Private'}</span>
                                     <span className="tag-badge">{rule.status}</span>
                                 </div>
                                 <div className="meta-row">
-                                    <span>By {rule.uploader_email}</span>
+                                    <span>By {rule.uploader_name}</span>
                                     <span className="meta-dot">•</span>
-                                    <span>File #{rule.id}</span>
+                                    <span>{(rule.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
                                 </div>
                             </div>
                             <div className="browse-card__side">
@@ -77,12 +90,18 @@ export function BrowsePage() {
                 </div>
 
                 {error && (
-                    <div className="empty-state">
+                    <div className="notice notice--error" role="alert">
                         <p>{error}</p>
                     </div>
                 )}
 
-                {!filteredRules.length && !error && (
+                {!activeGameSystem && !error && (
+                    <div className="empty-state">
+                        <p>Select a game system to browse matching files.</p>
+                    </div>
+                )}
+
+                {!filteredRules.length && !error && activeGameSystem && (
                     <div className="empty-state">
                         <p>No rules found matching your search.</p>
                     </div>
