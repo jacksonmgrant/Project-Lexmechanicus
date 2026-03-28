@@ -8,6 +8,6 @@ from ..config import settings
 
 def choose_model(auto_escalate: bool, retrieval_score: float, q_len: int, conflicts: int) -> str:
     model = settings.GPT5_MINI_MODEL
-    if auto_escalate and (retrieval_score < 0.45 or q_len > 280 or conflicts >= 2):
+    if auto_escalate and (retrieval_score < 0.78 or q_len > 120 or conflicts >= 1):
         model = settings.GPT5_FULL_MODEL
     return model

@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { Send, X } from 'lucide-react'
 import { ChatCitation, useAppContext } from '../../context/AppContext'
 import { apiErrorFromPayload, getErrorMessage, readResponsePayload } from '../../lib/api'
+import { ActiveGameSystemDropdown } from '../ActiveGameSystemDropdown'
+import { ActiveBundleDropdown } from '../ActiveBundleDropdown'
+import { CitationPreviewCard } from '../CitationPreviewCard'
 
 type Message = {
     id: string
@@ -19,44 +22,32 @@ function normalizeAssistantText(content: string): string {
         .replace(/\n{3,}/g, '\n\n')
 }
 
-function truncateDocumentTitle(title: string): string {
-    return title.length > 20 ? `${title.slice(0, 17)}...` : title
+function getReferencedCitations(content: string, citations: ChatCitation[]): ChatCitation[] {
+    const citedIds = Array.from(content.matchAll(/\[\[(c\d+)\]\]/g), (match) => match[1])
+    if (!citedIds.length) {
+        return citations
+    }
+
+    const citationsById = new Map(citations.map((citation) => [citation.id, citation]))
+    const ordered: ChatCitation[] = []
+    for (const citationId of citedIds) {
+        const citation = citationsById.get(citationId)
+        if (!citation || ordered.some((item) => item.id === citation.id)) {
+            continue
+        }
+        ordered.push(citation)
+    }
+    return ordered
 }
 
-function renderAssistantMessage(
-    content: string,
-    citations: ChatCitation[],
-    onOpenCitation: (citation: ChatCitation) => void,
-): React.ReactNode {
-    const citationsById = new Map(citations.map((citation) => [citation.id, citation]))
+function renderAssistantMessage(content: string): React.ReactNode {
     const prepared = content
         .replace(/(\S)(\[\[c\d+\]\])/g, '$1 $2')
-        .replace(/(\[\[c\d+\]\])(?=\S)/g, '$1 ')
+        .replace(/(\[\[c\d+\]\])(?=\S)/g, ' ')
+        .replace(/\[\[c\d+\]\]/g, '')
         .trim()
-    const parts = prepared.split(/(\[\[c\d+\]\])/g)
 
-    return parts.map((part, index) => {
-        const match = part.match(/^\[\[(c\d+)\]\]$/)
-        if (!match) {
-            return <span key={`text-${index}`}>{normalizeAssistantText(part)}</span>
-        }
-
-        const citation = citationsById.get(match[1])
-        if (!citation) {
-            return null
-        }
-
-        return (
-            <button
-                key={`citation-${citation.id}-${index}`}
-                type="button"
-                className="chat-citation"
-                onClick={() => onOpenCitation(citation)}
-            >
-                (<strong>{truncateDocumentTitle(citation.document_title)}</strong>: page {citation.page_number || 1})
-            </button>
-        )
-    })
+    return normalizeAssistantText(prepared)
 }
 
 export function ChatPage() {
@@ -230,6 +221,20 @@ export function ChatPage() {
 
     return (
         <div className="page-chat">
+            <div className="chat-topbar">
+                <div className="chat-topbar__inner">
+                    <div className="chat-topbar__controls">
+                        <div>
+                            <p className="chat-topbar__eyebrow">Current Game System</p>
+                            <ActiveGameSystemDropdown />
+                        </div>
+                        <div>
+                            <p className="chat-topbar__eyebrow">Reading Bundle</p>
+                            <ActiveBundleDropdown />
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div className="page-chat__messages" ref={scrollRef}>
                 <div className="message-stack">
                     {messages.map((message) => (
@@ -237,9 +242,20 @@ export function ChatPage() {
                             <div className={`message-bubble message-bubble--${message.role}`}>
                                 <p>
                                     {message.role === 'assistant'
-                                        ? renderAssistantMessage(message.content, message.citations || [], setViewerCitation)
+                                        ? renderAssistantMessage(message.content)
                                         : message.content}
                                 </p>
+                                {message.role === 'assistant' && getReferencedCitations(message.content, message.citations || []).length > 0 && (
+                                    <div className="citation-preview-strip">
+                                        {getReferencedCitations(message.content, message.citations || []).map((citation) => (
+                                            <CitationPreviewCard
+                                                key={citation.id}
+                                                citation={citation}
+                                                onOpenCitation={setViewerCitation}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}

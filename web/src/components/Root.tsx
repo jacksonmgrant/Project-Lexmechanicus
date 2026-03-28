@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { FileText, FolderOpen, Menu, MessageSquare, User, X } from 'lucide-react'
 import { useAppContext } from '../context/AppContext'
-import { ActiveGameSystemDropdown } from './ActiveGameSystemDropdown'
 
 const navigation = [
     { name: 'Chat', path: '/', icon: MessageSquare },
@@ -24,7 +23,6 @@ export function Root() {
         <div className="template-shell">
             <div className="template-mobile-header">
                 <div className="template-brand-cluster">
-                    <ActiveGameSystemDropdown />
                     <h1 className="template-brand-title">Lexmechanicus</h1>
                 </div>
                 <button className="icon-button icon-button--ghost" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
@@ -68,7 +66,6 @@ export function Root() {
             <div className="template-desktop-header">
                 <div className="template-desktop-header__inner">
                     <div className="template-brand-cluster">
-                        <ActiveGameSystemDropdown />
                         <h1 className="template-brand-title">Lexmechanicus</h1>
                     </div>
                     <nav className="template-desktop-nav">

@@ -12,7 +12,7 @@ from ..errors import error_detail, raise_api_error
 from ..rate_limiter import RateLimiter
 from ..services.bundles import load_accessible_bundle
 from ..services.citations import build_chat_citations
-from ..services.retrieval import hybrid_retrieve
+from ..services.retrieval import estimate_retrieval_quality, hybrid_retrieve
 from ..services.rulesets import get_ruleset_scope_ids
 from ..services.model_router import choose_model
 from ..services.openai_llm import stream_completion
@@ -27,11 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = (
-    "Answer succinctly in <=120 words using the retrieved snippets as your primary evidence. "
-    "Synthesize the best direct answer you can from relevant snippets, even if they are partial excerpts. "
-    "Only reply 'uncertain' when the retrieved snippets do not answer the user's core question or directly conflict. "
-    "Quote rule names only, not rule text. "
-    "Every factual claim must include an inline citation placeholder like [[c0]], [[c1]]."
+    "Answer the rules question in plain English using the retrieved excerpts as your evidence. "
+    "Start with the ruling or direct answer, then explain the controlling rule before any adjacent or less relevant rules. "
+    "If an exception or limitation changes the ruling, mention it immediately after the ruling instead of at the end. "
+    "Default to 2-4 sentences, but use short bullets when multiple conditions matter. "
+    "Prefer one short exact quote from the provided quote lines when wording materially supports the ruling. "
+    "Do not use or invent quotes that are not explicitly present in the provided quote lines. "
+    "Prefer a supported answer with a caveat over replying 'uncertain' when the excerpts clearly answer most of the question. "
+    "Every supported sentence or bullet must include at least one inline citation placeholder like [[c0]], [[c1]]."
 )
 
 
@@ -98,7 +101,7 @@ async def ask_stream(
             extra={"ruleset_id": ruleset_id, "bundle_id": bundle_id, "user_id": user.id if user else None},
         )
         citations = []
-    retrieval_score = 0.6 if chunks else 0.0 # TODO: compute properly
+    retrieval_score = estimate_retrieval_quality(chunks)
     conflicts = 0 # TODO: detect conflicting snippets
     model = choose_model(settings.FEATURE_AUTO_ESCALATE, retrieval_score, len(question), conflicts)
 

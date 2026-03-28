@@ -37,7 +37,10 @@ export type ChatCitation = {
     file_id: number
     document_title: string
     page_number: number | null
+    page_anchor_ratio?: number | null
     mime_type: string
+    section?: string | null
+    excerpt_text?: string
 }
 
 export type BundleDetail = {

@@ -295,6 +295,31 @@ button {
   }
 }
 
+.chat-topbar {
+  padding: 0.875rem 0.875rem 0;
+
+  &__inner {
+    padding: 0.875rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    background: #f8fafc;
+  }
+
+  &__controls {
+    display: grid;
+    gap: 0.875rem;
+  }
+
+  &__eyebrow {
+    margin: 0 0 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+}
+
 .message-stack {
   display: grid;
   gap: 1.5rem;
@@ -358,6 +383,86 @@ button {
 
   &:hover {
     color: #c2410c;
+  }
+}
+
+.citation-preview-strip {
+  display: grid;
+  gap: 0.875rem;
+  margin-top: 0.875rem;
+}
+
+.citation-preview-card {
+  display: grid;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #fed7aa;
+  border-radius: 1rem;
+  background: linear-gradient(180deg, rgba(255, 247, 237, 0.92), rgba(255, 255, 255, 0.98));
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+
+  &:hover {
+    transform: translateY(-1px);
+    border-color: #fdba74;
+    box-shadow: var(--shadow-sm);
+  }
+
+  &__body {
+    display: grid;
+    gap: 0.35rem;
+    padding: 0.9rem 1rem;
+    border-radius: 0.875rem;
+    background:
+      linear-gradient(135deg, rgba(251, 191, 36, 0.14), rgba(249, 115, 22, 0.1)),
+      repeating-linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.7),
+        rgba(255, 255, 255, 0.7) 1.75rem,
+        rgba(255, 255, 255, 0.12) 1.75rem,
+        rgba(255, 255, 255, 0.12) 1.9rem
+      );
+  }
+
+  &__meta,
+  &__section,
+  &__excerpt {
+    margin: 0;
+  }
+
+  &__meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: #7c2d12;
+
+    strong {
+      font-size: 0.95rem;
+      color: #431407;
+    }
+
+    span {
+      white-space: nowrap;
+    }
+  }
+
+  &__section {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: #9a3412;
+  }
+
+  &__excerpt {
+    font-size: 0.875rem;
+    line-height: 1.6;
+    color: #7c2d12;
   }
 }
 
@@ -937,6 +1042,16 @@ button {
     font-weight: 600;
     max-width: min(100%, 16rem);
   }
+
+  &--bundle {
+    min-height: 2rem;
+    padding: 0 0.875rem;
+    font-weight: 600;
+    max-width: min(100%, 16rem);
+    border: 1px solid #1d4ed8;
+    background: rgba(59, 130, 246, 0.12);
+    color: #1d4ed8;
+  }
 }
 
 .dropdown-trigger__label {
@@ -1253,6 +1368,19 @@ button {
 }
 
 .active-game-system {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+
+  &__error {
+    margin: 0;
+    max-width: 14rem;
+    font-size: 0.7rem;
+    color: var(--danger);
+  }
+}
+
+.active-bundle {
   display: grid;
   gap: 0.25rem;
   min-width: 0;
@@ -1630,6 +1758,15 @@ button {
   .manage-card__header {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
+  }
+
+  .chat-topbar__controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .citation-preview-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .button-row > *,

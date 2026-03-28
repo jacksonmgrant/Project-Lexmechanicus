@@ -1,48 +1,131 @@
 from __future__ import annotations
-import httpx, json
+import json
+import httpx
 
 from ..errors import raise_api_error
 from ..config import settings
 
 
+PRIMARY_MAX_OUTPUT_TOKENS = 720
+RETRY_MAX_OUTPUT_TOKENS = 1100
+
+
 def _build_agent_instructions(system: str) -> str:
     return (
         f"You are {settings.OPENAI_AGENT_NAME}. "
-        "You answer questions about tabletop rules documents and uploaded reference material. "
-        "Prefer retrieved evidence over guesswork. "
-        "Use relevant retrieved snippets to give the best supported answer you can, even when they are partial excerpts. "
-        "Only say 'uncertain' when the retrieved evidence does not answer the user's core question or directly conflicts.\n\n"
+        "You answer tabletop rules questions using only the retrieved excerpts. "
+        "Act like a careful rules judge: give the ruling first, then the controlling rule explanation immediately after it. "
+        "Lead with the operative rule, not background, theme text, or tangential related rules. "
+        "Prefer a decisive paraphrase over hedging when the evidence is clear. "
+        "If the evidence supports only part of the answer, state the supported part and identify the missing condition. "
+        "If multiple excerpts matter, synthesize the controlling rule and its exception together instead of discussing them separately. "
+        "When quoting matters, use only short exact quotes taken from the provided 'Key quote' or 'Supporting quote' lines. Never invent, merge, or clean up a quote beyond whitespace normalization. "
+        "If a limitation or exception changes the ruling, mention it immediately after the ruling instead of saving it for the end. "
+        "Avoid preambles like 'Based on the excerpts' or references to JSON, retrieval, or internal context. "
+        "Use inline citation placeholders like [[c0]] after each supported sentence or bullet. "
+        "Only say 'uncertain' when the retrieved evidence does not support a ruling or directly conflicts.\n\n"
         f"{system}"
     )
 
 
-def _build_input_items(user: str, context_chunks: list[dict]) -> list[dict]:
-    serialized_chunks = []
-    for idx, chunk in enumerate(context_chunks):
-        serialized_chunks.append(
-            {
-                "citation_id": f"c{idx}",
-                "title": chunk.get("title"),
-                "section": chunk.get("section"),
-                "snippet": chunk.get("snippet"),
-                "file_id": chunk.get("file_id"),
-                "filename": chunk.get("filename"),
-            }
-        )
+def _clean_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
 
-    context_text = json.dumps(serialized_chunks, ensure_ascii=True)[:12000]
+
+def _trim_context_excerpt(value: str, *, max_chars: int = 420) -> str:
+    normalized = _clean_text(value)
+    if len(normalized) <= max_chars:
+        return normalized
+    truncated = normalized[: max_chars - 3].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated + "..."
+
+
+def _append_chunk_lines(lines: list[str], index: int, chunk: dict) -> None:
+    source_title = _clean_text(chunk.get("source_title") or chunk.get("title") or chunk.get("file_title") or chunk.get("filename") or f"Document {index + 1}")
+    section = _clean_text(chunk.get("section"))
+    excerpt = _trim_context_excerpt(chunk.get("excerpt") or chunk.get("snippet") or "")
+    key_quote = _clean_text(chunk.get("key_quote"))
+    supporting_quote = _clean_text(chunk.get("supporting_quote"))
+
+    lines.append(f"[c{index}] Source: {source_title}")
+    if section and section.lower() != source_title.lower():
+        lines.append(f"Section: {section}")
+    if key_quote:
+        lines.append(f'Key quote: "{key_quote}"')
+    if supporting_quote and supporting_quote.lower() != key_quote.lower():
+        lines.append(f'Supporting quote: "{supporting_quote}"')
+    if excerpt:
+        lines.append(f"Context excerpt: {excerpt}")
+    lines.append("")
+
+
+def _build_context_brief(user: str, context_chunks: list[dict], *, max_chars: int = 16000) -> str:
+    lines = [
+        "User question:",
+        _clean_text(user),
+        "",
+        "Primary evidence (highest-confidence rule matches):",
+    ]
+
+    if not context_chunks:
+        lines.append("No supporting excerpts were retrieved.")
+    else:
+        primary_chunks = context_chunks[:2]
+        supporting_chunks = context_chunks[2:6]
+
+        for idx, chunk in enumerate(primary_chunks):
+            _append_chunk_lines(lines, idx, chunk)
+
+        if supporting_chunks:
+            lines.append("Supporting evidence / exceptions:")
+            lines.append("")
+            for offset, chunk in enumerate(supporting_chunks, start=len(primary_chunks)):
+                _append_chunk_lines(lines, offset, chunk)
+
+    lines.extend(
+        [
+            "Answer expectations:",
+            "- First sentence: the direct ruling or answer to the question.",
+            "- Second sentence: the controlling rule explanation, using the strongest evidence first.",
+            "- Third sentence: the most relevant exception, limitation, or edge condition, only if needed.",
+            "- Use plain English, but include one short exact quote when it materially strengthens the answer.",
+            "- Quote only from lines labeled 'Key quote' or 'Supporting quote'.",
+            "- Do not lead with background, examples, or adjacent rules before the controlling rule.",
+            "- Cite each supported sentence or bullet with [[c#]].",
+            "- Reply with exactly 'uncertain' only if the excerpts do not support a ruling.",
+        ]
+    )
+
+    brief = "\n".join(lines).strip()
+    return brief[:max_chars]
+
+
+def _build_input_items(user: str, context_chunks: list[dict]) -> list[dict]:
     return [
         {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": user},
                 {
                     "type": "input_text",
-                    "text": "Retrieved context JSON:\n" + context_text,
+                    "text": _build_context_brief(user, context_chunks),
                 },
             ],
         }
     ]
+
+
+def _build_payload(model: str, system: str, user: str, context_chunks: list[dict], *, max_output_tokens: int) -> dict[str, object]:
+    return {
+        "model": model,
+        "instructions": _build_agent_instructions(system),
+        "input": _build_input_items(user, context_chunks),
+        "stream": True,
+        "max_output_tokens": max_output_tokens,
+        "reasoning": {"effort": "minimal"},
+        "text": {"verbosity": "low"},
+    }
 
 
 async def stream_completion(model: str, system: str, user: str, context_chunks: list[dict]):
@@ -54,44 +137,57 @@ async def stream_completion(model: str, system: str, user: str, context_chunks: 
         headers["OpenAI-Project"] = settings.OPENAI_PROJECT_ID
     if settings.OPENAI_ORG_ID:
         headers["OpenAI-Organization"] = settings.OPENAI_ORG_ID
-    payload: dict[str, object] = {
-        "model": model,
-        "instructions": _build_agent_instructions(system),
-        "input": _build_input_items(user, context_chunks),
-        "stream": True,
-        "max_output_tokens": 320,
-        "reasoning": {"effort": "minimal"},
-        "text": {"verbosity": "low"},
-    }
+    attempts = (
+        PRIMARY_MAX_OUTPUT_TOKENS,
+        RETRY_MAX_OUTPUT_TOKENS,
+    )
     try:
         async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=payload) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    chunk = line[6:]
-                    if chunk == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        continue
+            for attempt_index, max_output_tokens in enumerate(attempts):
+                emitted_in_attempt = False
+                retry_requested = False
+                payload = _build_payload(
+                    model,
+                    system,
+                    user,
+                    context_chunks,
+                    max_output_tokens=max_output_tokens,
+                )
+                async with client.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=payload) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        chunk = line[6:]
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(chunk)
+                        except json.JSONDecodeError:
+                            continue
 
-                    event_type = event.get("type")
-                    if event_type == "response.output_text.delta":
-                        delta = event.get("delta")
-                        if delta:
-                            yield delta
-                    elif event_type == "response.incomplete":
-                        details = event.get("response", {}).get("incomplete_details") or {}
-                        reason = details.get("reason")
-                        if reason == "max_output_tokens":
-                            raise_api_error(502, "The AI response ran out of output tokens before it could finish. Please try again.", "AI_RESPONSE_INCOMPLETE")
-                        raise_api_error(502, "The AI response ended before completion. Please try again.", "AI_RESPONSE_INCOMPLETE")
-                    elif event_type == "error":
-                        message = event.get("message") or "OpenAI streaming error"
-                        raise_api_error(502, message, "AI_STREAM_ERROR")
+                        event_type = event.get("type")
+                        if event_type == "response.output_text.delta":
+                            delta = event.get("delta")
+                            if delta:
+                                emitted_in_attempt = True
+                                yield delta
+                        elif event_type == "response.incomplete":
+                            details = event.get("response", {}).get("incomplete_details") or {}
+                            reason = details.get("reason")
+                            if reason == "max_output_tokens":
+                                if emitted_in_attempt:
+                                    return
+                                if attempt_index < len(attempts) - 1:
+                                    retry_requested = True
+                                    break
+                                raise_api_error(502, "The AI response ran out of output tokens before it could finish. Please try again.", "AI_RESPONSE_INCOMPLETE")
+                            raise_api_error(502, "The AI response ended before completion. Please try again.", "AI_RESPONSE_INCOMPLETE")
+                        elif event_type == "error":
+                            message = event.get("message") or "OpenAI streaming error"
+                            raise_api_error(502, message, "AI_STREAM_ERROR")
+                if not retry_requested:
+                    return
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
             raise_api_error(503, "AI responses are unavailable because the provider credentials are invalid.", "AI_AUTH_FAILED")

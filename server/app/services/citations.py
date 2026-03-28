@@ -55,15 +55,27 @@ def _build_pdf_page_spans(data: bytes) -> list[tuple[int, int, int]]:
     return spans
 
 
-def _resolve_page_number(start_byte: int, end_byte: int, spans: list[tuple[int, int, int]]) -> int | None:
+def _clean_excerpt(value: str | None, *, max_length: int = 280) -> str:
+    cleaned = " ".join((value or "").split()).strip()
+    if len(cleaned) <= max_length:
+        return cleaned
+    truncated = cleaned[: max_length - 3].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated + "..."
+
+
+def _resolve_page_location(start_byte: int, end_byte: int, spans: list[tuple[int, int, int]]) -> tuple[int | None, float | None]:
     if not spans:
-        return None
+        return None, None
 
     midpoint = start_byte + max(end_byte - start_byte, 0) // 2
     for start, end, page_number in spans:
         if start <= midpoint <= max(end, start):
-            return page_number
-    return spans[-1][2]
+            page_length = max(end - start, 1)
+            anchor_ratio = min(0.95, max(0.05, (midpoint - start) / page_length))
+            return page_number, anchor_ratio
+    return spans[-1][2], 0.5
 
 
 async def build_chat_citations(chunks: list[dict]) -> list[dict]:
@@ -99,6 +111,7 @@ async def build_chat_citations(chunks: list[dict]) -> list[dict]:
         document_title = file_record["title"]
         needs_extracted_title = should_replace_with_extracted_title(document_title, file_record["filename"] or "")
         page_number: int | None = 1
+        page_anchor_ratio: float | None = 0.5
         if file_record["mime_type"] == "application/pdf":
             if file_id not in file_bytes_by_file_id:
                 try:
@@ -111,11 +124,12 @@ async def build_chat_citations(chunks: list[dict]) -> list[dict]:
                     page_spans_by_file_id[file_id] = _build_pdf_page_spans(data) if data else []
                 except Exception:
                     page_spans_by_file_id[file_id] = []
-            page_number = _resolve_page_number(
+            page_number, page_anchor_ratio = _resolve_page_location(
                 int(chunk.get("start_byte") or 0),
                 int(chunk.get("end_byte") or 0),
                 page_spans_by_file_id[file_id],
-            ) or 1
+            )
+            page_number = page_number or 1
         elif needs_extracted_title and file_id not in file_bytes_by_file_id:
             try:
                 file_bytes_by_file_id[file_id] = await _read_file_bytes(file_record["s3_key"])
@@ -137,7 +151,10 @@ async def build_chat_citations(chunks: list[dict]) -> list[dict]:
                 "file_id": file_id,
                 "document_title": document_title,
                 "page_number": page_number,
+                "page_anchor_ratio": page_anchor_ratio,
                 "mime_type": file_record["mime_type"],
+                "section": chunk.get("section"),
+                "excerpt_text": _clean_excerpt(chunk.get("excerpt") or chunk.get("snippet")),
             }
         )
 
