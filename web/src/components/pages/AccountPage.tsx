@@ -61,7 +61,7 @@ function PasswordField({ id, label, value, hidden, placeholder, onChange, onTogg
 }
 
 export function AccountPage() {
-    const { changePassword, listFiles, login, logout, session, signup } = useAppContext()
+    const { changePassword, listFiles, login, logout, session, signup, updateProfile } = useAppContext()
     const [email, setEmail] = useState(session?.user?.email || '')
     const [displayName, setDisplayName] = useState(session?.user?.display_name || '')
     const [authPassword, setAuthPassword] = useState('')
@@ -77,6 +77,7 @@ export function AccountPage() {
     const [message, setMessage] = useState('')
     const [messageType, setMessageType] = useState<'error' | 'success'>('success')
     const [storageBytes, setStorageBytes] = useState(0)
+    const [isSavingProfile, setIsSavingProfile] = useState(false)
 
     useEffect(() => {
         if (!session?.authenticated) {
@@ -95,6 +96,7 @@ export function AccountPage() {
     }, [session])
 
     const validateEmail = (value: string) => /\S+@\S+\.\S+/.test(value.trim())
+    const hasProfileChanges = session?.authenticated && displayName.trim() !== (session.user?.display_name || '')
 
     const handleAuth = async () => {
         const normalizedEmail = email.trim()
@@ -167,6 +169,25 @@ export function AccountPage() {
         }
     }
 
+    const handleProfileUpdate = async () => {
+        if (!session?.authenticated) {
+            setMessageType('error')
+            setMessage('Sign in before updating your profile.')
+            return
+        }
+        try {
+            setIsSavingProfile(true)
+            const result = await updateProfile(displayName)
+            setMessageType('success')
+            setMessage(result)
+        } catch (error) {
+            setMessageType('error')
+            setMessage(getErrorMessage(error, 'Unable to update your profile.'))
+        } finally {
+            setIsSavingProfile(false)
+        }
+    }
+
     return (
         <div className="page-scroll">
             <div className="page-container page-container--narrow">
@@ -229,13 +250,28 @@ export function AccountPage() {
                             <div className="form-stack">
                                 <div className="field-group">
                                     <label htmlFor="name">Display Name</label>
-                                    <input id="name" value={session.user?.display_name || session.user?.email?.split('@')[0] || 'User'} readOnly className="text-input" />
+                                    <input
+                                        id="name"
+                                        value={displayName}
+                                        onChange={(event) => setDisplayName(event.target.value)}
+                                        className="text-input"
+                                        maxLength={120}
+                                        placeholder="Anonymous"
+                                    />
                                 </div>
                                 <div className="field-group">
                                     <label htmlFor="email">Email Address</label>
                                     <input id="email" type="email" value={session.user?.email || ''} readOnly className="text-input" />
                                 </div>
                                 <div className="button-row">
+                                    <button
+                                        type="button"
+                                        className="secondary-button secondary-button--inline"
+                                        onClick={handleProfileUpdate}
+                                        disabled={!hasProfileChanges || isSavingProfile}
+                                    >
+                                        {isSavingProfile ? 'Saving...' : 'Save Profile'}
+                                    </button>
                                     <button type="button" className="primary-button primary-button--inline" onClick={logout}>Sign Out</button>
                                 </div>
                             </div>

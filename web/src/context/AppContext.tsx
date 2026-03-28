@@ -15,11 +15,42 @@ export type Ruleset = {
     slug: string
 }
 
+export type Bundle = {
+    id: number
+    title: string
+    description?: string | null
+    is_public: boolean
+    is_saved: boolean
+    is_default: boolean
+    is_owned: boolean
+    file_count: number
+    save_count: number
+    game_system_id: number
+    game_system: Ruleset | null
+    owner_name: string
+    preview_titles: string[]
+    created_at?: string | null
+}
+
+export type ChatCitation = {
+    id: string
+    file_id: number
+    document_title: string
+    page_number: number | null
+    mime_type: string
+}
+
+export type BundleDetail = {
+    bundle: Bundle
+    files: ListedFile[]
+}
+
 type SessionInfo = {
     authenticated: boolean
     user: { id: number, email: string, display_name?: string | null, created_at: string | null } | null
     active_game_system?: Ruleset | null
     available_game_systems?: Ruleset[]
+    active_bundle?: Bundle | null
     free_usage?: {
         limit: number
         used: number
@@ -37,23 +68,31 @@ export type ListedFile = {
     mime_type: string
     size_bytes: number
     is_public: boolean
+    is_saved: boolean
     status: string
     folder_id: number
     game_system_id: number
     game_system: Ruleset | null
     tags: Tag[]
-    uploader_email: string
     uploader_name: string
     chunk_count: number
-    downloads: number
-    views: number
+    save_count: number
 }
 
-type FileScope = 'browse' | 'mine'
+type FileScope = 'browse' | 'mine' | 'saved'
+type BundleScope = 'browse' | 'mine' | 'saved'
 
 type CreateRulesetInput = {
     name: string
     aliases?: string[]
+}
+
+type CreateBundleInput = {
+    title: string
+    description?: string
+    rulesetId: number
+    fileIds: number[]
+    isPublic: boolean
 }
 
 type AppContextValue = {
@@ -66,19 +105,34 @@ type AppContextValue = {
     defaultFolderId: number
     activeGameSystem: Ruleset | null
     availableGameSystems: Ruleset[]
+    activeBundle: Bundle | null
     refreshSession: () => Promise<void>
     refreshGameSystems: () => Promise<void>
     login: (email: string, password: string) => Promise<string>
     signup: (displayName: string, email: string, password: string) => Promise<string>
     logout: () => void
+    updateProfile: (displayName: string) => Promise<string>
     changePassword: (currentPassword: string, newPassword: string) => Promise<string>
     listFiles: (scope: FileScope, query?: string, rulesetId?: number) => Promise<ListedFile[]>
     uploadFile: (file: File, isPublic: boolean, title: string, description?: string, rulesetId?: number | null, tagIds?: number[]) => Promise<{ file_id: number, chunks: number }>
     deleteFile: (fileId: number) => Promise<void>
-    streamAsk: (question: string, onToken: (token: string) => void) => Promise<void>
+    saveFile: (fileId: number) => Promise<void>
+    unsaveFile: (fileId: number) => Promise<void>
+    listBundles: (scope: BundleScope, query?: string, rulesetId?: number) => Promise<Bundle[]>
+    getBundle: (bundleId: number) => Promise<BundleDetail>
+    createBundle: (input: CreateBundleInput) => Promise<Bundle>
+    addFilesToBundle: (bundleId: number, fileIds: number[]) => Promise<BundleDetail>
+    removeFileFromBundle: (bundleId: number, fileId: number) => Promise<{ deleted: boolean, bundle?: Bundle, files?: ListedFile[] }>
+    deleteBundle: (bundleId: number) => Promise<void>
+    updateBundleTitle: (bundleId: number, title: string) => Promise<string>
+    saveBundle: (bundleId: number) => Promise<void>
+    unsaveBundle: (bundleId: number) => Promise<void>
+    setActiveBundle: (rulesetId: number, bundleId: number | null) => Promise<void>
+    streamAsk: (question: string, onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => Promise<void>
     searchTags: (query: string, limit?: number) => Promise<Tag[]>
     createTag: (name: string) => Promise<Tag>
     updateFileTags: (fileId: number, tagIds: number[]) => Promise<Tag[]>
+    updateFileTitle: (fileId: number, title: string) => Promise<string>
     searchGameSystems: (query: string, limit?: number) => Promise<Ruleset[]>
     createGameSystem: (input: CreateRulesetInput) => Promise<Ruleset>
     updateFileGameSystem: (fileId: number, rulesetId: number) => Promise<Ruleset>
@@ -93,7 +147,7 @@ function buildSseLines(rawEvent: string) {
     const dataLines: string[] = []
     for (const line of lines) {
         if (line.startsWith('event:')) eventName = line.slice(6).trim()
-        if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+        if (line.startsWith('data:')) dataLines.push(line.startsWith('data: ') ? line.slice(6) : line.slice(5))
     }
     return { eventName, data: dataLines.join('\n') }
 }
@@ -112,10 +166,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const [sessionError, setSessionError] = React.useState('')
     const [activeGameSystem, setActiveGameSystemState] = React.useState<Ruleset | null>(null)
     const [availableGameSystems, setAvailableGameSystems] = React.useState<Ruleset[]>([])
+    const [activeBundle, setActiveBundleState] = React.useState<Bundle | null>(null)
 
-    const applyGameSystems = React.useCallback((nextActive: Ruleset | null | undefined, nextAvailable: Ruleset[] | undefined) => {
+    const applyGameSystems = React.useCallback((
+        nextActive: Ruleset | null | undefined,
+        nextAvailable: Ruleset[] | undefined,
+        nextBundle?: Bundle | null,
+    ) => {
         setActiveGameSystemState(nextActive || null)
         setAvailableGameSystems(nextAvailable || [])
+        setActiveBundleState(nextBundle || null)
     }, [])
 
     const authHeaders = React.useCallback((includeGuest = true) => {
@@ -133,7 +193,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 fallbackMessage: 'Unable to load your session.',
             })
             setSession(payload)
-            applyGameSystems(payload.active_game_system, payload.available_game_systems)
+            applyGameSystems(payload.active_game_system, payload.available_game_systems, payload.active_bundle)
             setSessionError('')
         } catch (error) {
             setSession(null)
@@ -143,12 +203,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }, [apiBase, applyGameSystems, authHeaders])
 
     const refreshGameSystems = React.useCallback(async () => {
-        const payload = await requestJson<{ active_game_system: Ruleset | null, available_game_systems: Ruleset[] }>(`${apiBase}/uploads/game-systems`, {
+        const payload = await requestJson<{ active_game_system: Ruleset | null, available_game_systems: Ruleset[], active_bundle?: Bundle | null }>(`${apiBase}/uploads/game-systems`, {
             headers: authHeaders(false),
             operation: 'Load game systems',
             fallbackMessage: 'Unable to load game systems.',
         })
-        applyGameSystems(payload.active_game_system, payload.available_game_systems)
+        applyGameSystems(payload.active_game_system, payload.available_game_systems, payload.active_bundle)
     }, [apiBase, applyGameSystems, authHeaders])
 
     React.useEffect(() => {
@@ -212,12 +272,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return 'Account created.'
     }, [apiBase, guestId, refreshSession, storeToken])
 
+    const updateProfile = React.useCallback(async (displayName: string) => {
+        const payload = await requestJson<{ user: SessionInfo['user'] }>(`${apiBase}/auth/profile`, {
+            method: 'PUT',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_name: displayName }),
+            operation: 'Update profile',
+            fallbackMessage: 'Unable to update your profile.',
+        })
+        setSession((current) => current ? { ...current, user: payload.user } : current)
+        return 'Profile updated.'
+    }, [apiBase, authHeaders])
+
     const listFiles = React.useCallback(async (scope: FileScope, query = '', rulesetId?: number) => {
         const params = new URLSearchParams({ scope, q: query, limit: '50' })
         if (typeof rulesetId === 'number') params.set('ruleset_id', String(rulesetId))
         return requestJson<ListedFile[]>(`${apiBase}/uploads/files?${params.toString()}`, {
             headers: authHeaders(false),
-            operation: scope === 'mine' ? 'List my files' : 'Browse files',
+            operation: scope === 'mine' ? 'List my files' : (scope === 'saved' ? 'List saved files' : 'Browse files'),
             fallbackMessage: 'Unable to load files.',
         })
     }, [apiBase, authHeaders])
@@ -255,6 +327,131 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         })
         await refreshGameSystems().catch(() => undefined)
     }, [apiBase, authHeaders, refreshGameSystems])
+
+    const saveFile = React.useCallback(async (fileId: number) => {
+        await requestVoid(`${apiBase}/uploads/${fileId}/saved`, {
+            method: 'POST',
+            headers: authHeaders(false),
+            operation: 'Save file',
+            fallbackMessage: 'Unable to save file.',
+        })
+    }, [apiBase, authHeaders])
+
+    const unsaveFile = React.useCallback(async (fileId: number) => {
+        await requestVoid(`${apiBase}/uploads/${fileId}/saved`, {
+            method: 'DELETE',
+            headers: authHeaders(false),
+            operation: 'Unsave file',
+            fallbackMessage: 'Unable to remove saved file.',
+        })
+    }, [apiBase, authHeaders])
+
+    const listBundles = React.useCallback(async (scope: BundleScope, query = '', rulesetId?: number) => {
+        const params = new URLSearchParams({ scope, q: query, limit: '50' })
+        if (typeof rulesetId === 'number') params.set('ruleset_id', String(rulesetId))
+        return requestJson<Bundle[]>(`${apiBase}/uploads/bundles?${params.toString()}`, {
+            headers: authHeaders(false),
+            operation: scope === 'mine' ? 'List my bundles' : (scope === 'saved' ? 'List saved bundles' : 'Browse bundles'),
+            fallbackMessage: 'Unable to load bundles.',
+        })
+    }, [apiBase, authHeaders])
+
+    const createBundle = React.useCallback(async (input: CreateBundleInput) => {
+        return requestJson<Bundle>(`${apiBase}/uploads/bundles`, {
+            method: 'POST',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: input.title,
+                description: input.description || '',
+                ruleset_id: input.rulesetId,
+                file_ids: input.fileIds,
+                is_public: input.isPublic,
+            }),
+            operation: 'Create bundle',
+            fallbackMessage: 'Unable to create the bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const getBundle = React.useCallback(async (bundleId: number) => {
+        return requestJson<BundleDetail>(`${apiBase}/uploads/bundles/${bundleId}`, {
+            headers: authHeaders(false),
+            operation: 'Load bundle',
+            fallbackMessage: 'Unable to load the bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const addFilesToBundle = React.useCallback(async (bundleId: number, fileIds: number[]) => {
+        return requestJson<BundleDetail>(`${apiBase}/uploads/bundles/${bundleId}/files`, {
+            method: 'POST',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_ids: fileIds }),
+            operation: 'Add files to bundle',
+            fallbackMessage: 'Unable to add files to the bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const removeFileFromBundle = React.useCallback(async (bundleId: number, fileId: number) => {
+        return requestJson<{ deleted: boolean, bundle?: Bundle, files?: ListedFile[] }>(`${apiBase}/uploads/bundles/${bundleId}/files/${fileId}`, {
+            method: 'DELETE',
+            headers: authHeaders(false),
+            operation: 'Remove file from bundle',
+            fallbackMessage: 'Unable to remove that file from the bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const deleteBundle = React.useCallback(async (bundleId: number) => {
+        await requestVoid(`${apiBase}/uploads/bundles/${bundleId}`, {
+            method: 'DELETE',
+            headers: authHeaders(false),
+            operation: 'Delete bundle',
+            fallbackMessage: 'Unable to delete the bundle.',
+        })
+        if (activeBundle?.id === bundleId) {
+            setActiveBundleState(null)
+        }
+        await refreshGameSystems().catch(() => undefined)
+    }, [activeBundle?.id, apiBase, authHeaders, refreshGameSystems])
+
+    const updateBundleTitle = React.useCallback(async (bundleId: number, title: string) => {
+        const payload = await requestJson<{ title: string }>(`${apiBase}/uploads/bundles/${bundleId}/title`, {
+            method: 'PUT',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title }),
+            operation: 'Update bundle title',
+            fallbackMessage: 'Unable to update the bundle title.',
+        })
+        setActiveBundleState((current) => current && current.id === bundleId ? { ...current, title: payload.title } : current)
+        return payload.title
+    }, [apiBase, authHeaders])
+
+    const saveBundle = React.useCallback(async (bundleId: number) => {
+        await requestVoid(`${apiBase}/uploads/bundles/${bundleId}/saved`, {
+            method: 'POST',
+            headers: authHeaders(false),
+            operation: 'Save bundle',
+            fallbackMessage: 'Unable to save bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const unsaveBundle = React.useCallback(async (bundleId: number) => {
+        await requestVoid(`${apiBase}/uploads/bundles/${bundleId}/saved`, {
+            method: 'DELETE',
+            headers: authHeaders(false),
+            operation: 'Unsave bundle',
+            fallbackMessage: 'Unable to remove saved bundle.',
+        })
+    }, [apiBase, authHeaders])
+
+    const setActiveBundle = React.useCallback(async (rulesetId: number, bundleId: number | null) => {
+        const payload = await requestJson<{ active_bundle: Bundle | null }>(`${apiBase}/uploads/bundles/active`, {
+            method: 'PUT',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ruleset_id: rulesetId, bundle_id: bundleId }),
+            operation: 'Set active bundle',
+            fallbackMessage: 'Unable to set the active bundle.',
+        })
+        setActiveBundleState(payload.active_bundle || null)
+    }, [apiBase, authHeaders])
 
     const changePassword = React.useCallback(async (currentPassword: string, newPassword: string) => {
         await requestVoid(`${apiBase}/auth/password`, {
@@ -297,6 +494,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return payload.tags
     }, [apiBase, authHeaders])
 
+    const updateFileTitle = React.useCallback(async (fileId: number, title: string) => {
+        const payload = await requestJson<{ title: string }>(`${apiBase}/uploads/${fileId}/title`, {
+            method: 'PUT',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title }),
+            operation: 'Update file title',
+            fallbackMessage: 'Unable to update the file title.',
+        })
+        return payload.title
+    }, [apiBase, authHeaders])
+
     const searchGameSystems = React.useCallback(async (query: string, limit = 12) => {
         const params = new URLSearchParams({ q: query, limit: String(limit) })
         return requestJson<Ruleset[]>(`${apiBase}/uploads/game-systems/search?${params.toString()}`, {
@@ -334,17 +542,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }, [apiBase, authHeaders, refreshGameSystems])
 
     const setActiveGameSystem = React.useCallback(async (rulesetId: number) => {
-        const payload = await requestJson<{ active_game_system: Ruleset | null, available_game_systems: Ruleset[] }>(`${apiBase}/uploads/game-systems/active`, {
+        const payload = await requestJson<{ active_game_system: Ruleset | null, available_game_systems: Ruleset[], active_bundle?: Bundle | null }>(`${apiBase}/uploads/game-systems/active`, {
             method: 'PUT',
             headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
             body: JSON.stringify({ ruleset_id: rulesetId }),
             operation: 'Set active game system',
             fallbackMessage: 'Unable to set the active game system.',
         })
-        applyGameSystems(payload.active_game_system, payload.available_game_systems)
+        applyGameSystems(payload.active_game_system, payload.available_game_systems, payload.active_bundle)
     }, [apiBase, applyGameSystems, authHeaders])
 
-    const streamAsk = React.useCallback(async (question: string, onToken: (token: string) => void) => {
+    const streamAsk = React.useCallback(async (question: string, onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => {
         if (!activeGameSystem?.id) {
             throw new ApiError('Choose a game system before chatting.', {
                 status: 422,
@@ -352,7 +560,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             })
         }
         const rulesetId = activeGameSystem.id
-        const url = `${apiBase}/ask/stream?q=${encodeURIComponent(question)}&ruleset_id=${rulesetId}`
+        const params = new URLSearchParams({ q: question, ruleset_id: String(rulesetId) })
+        if (activeBundle?.id) params.set('bundle_id', String(activeBundle.id))
+        const url = `${apiBase}/ask/stream?${params.toString()}`
         let response: Response
         try {
             response = await fetch(url, {
@@ -388,6 +598,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     if (rawEvent) {
                         const { eventName, data } = buildSseLines(rawEvent)
                         if (eventName === 'token') onToken(data)
+                        if (eventName === 'citations') {
+                            try {
+                                const payload = data ? JSON.parse(data) as { citations?: ChatCitation[] } : null
+                                onCitations?.(Array.isArray(payload?.citations) ? payload.citations : [])
+                            } catch {
+                                onCitations?.([])
+                            }
+                        }
                         if (eventName === 'error') {
                             let payload: unknown = data
                             try {
@@ -419,7 +637,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         await refreshSession().catch(() => undefined)
-    }, [activeGameSystem, apiBase, authHeaders, refreshSession])
+    }, [activeBundle?.id, activeGameSystem, apiBase, authHeaders, refreshSession])
 
     const value = React.useMemo<AppContextValue>(() => ({
         apiBase,
@@ -431,6 +649,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         defaultFolderId,
         activeGameSystem,
         availableGameSystems,
+        activeBundle,
         refreshSession,
         refreshGameSystems,
         login: (email, password) => authenticate('/auth/login', email, password),
@@ -439,15 +658,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             storeToken('')
             setSessionError('')
             setSession((current) => current ? { authenticated: false, user: null, free_usage: current.free_usage } : null)
+            setActiveBundleState(null)
         },
+        updateProfile,
         changePassword,
         listFiles,
         uploadFile,
         deleteFile,
+        saveFile,
+        unsaveFile,
+        listBundles,
+        getBundle,
+        createBundle,
+        addFilesToBundle,
+        removeFileFromBundle,
+        deleteBundle,
+        updateBundleTitle,
+        saveBundle,
+        unsaveBundle,
+        setActiveBundle,
         streamAsk,
         searchTags,
         createTag,
         updateFileTags,
+        updateFileTitle,
         searchGameSystems,
         createGameSystem,
         updateFileGameSystem,
@@ -462,19 +696,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         defaultFolderId,
         activeGameSystem,
         availableGameSystems,
+        activeBundle,
         refreshSession,
         refreshGameSystems,
         authenticate,
         signup,
         storeToken,
+        updateProfile,
         changePassword,
         listFiles,
         uploadFile,
         deleteFile,
+        saveFile,
+        unsaveFile,
+        listBundles,
+        getBundle,
+        createBundle,
+        addFilesToBundle,
+        removeFileFromBundle,
+        deleteBundle,
+        updateBundleTitle,
+        saveBundle,
+        unsaveBundle,
+        setActiveBundle,
         streamAsk,
         searchTags,
         createTag,
         updateFileTags,
+        updateFileTitle,
         searchGameSystems,
         createGameSystem,
         updateFileGameSystem,

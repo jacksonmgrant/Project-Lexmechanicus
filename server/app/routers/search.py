@@ -1,6 +1,8 @@
 from __future__ import annotations
+import logging
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import text
+from sqlalchemy import Integer, String, bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..auth import get_optional_user
@@ -10,6 +12,7 @@ from ..services.rulesets import get_ruleset_scope_ids
 
 
 router = APIRouter(prefix="/search", tags=["search"])
+logger = logging.getLogger(__name__)
 
 
 SQL = """
@@ -34,6 +37,13 @@ LIMIT 20
 """
 
 
+SEARCH_QUERY = text(SQL).bindparams(
+    bindparam("q", type_=String()),
+    bindparam("ruleset_id", type_=Integer()),
+    bindparam("user_id", type_=Integer()),
+)
+
+
 @router.get("")
 async def search(q: str = Query(..., min_length=1, max_length=200), ruleset_id: int = Query(..., ge=1), user=Depends(get_optional_user)):
     normalized_query = q.strip()
@@ -49,7 +59,7 @@ async def search(q: str = Query(..., min_length=1, max_length=200), ruleset_id: 
                 raise_api_error(422, "Choose a game system before searching.", "RULESET_REQUIRED")
             rows = (
                 await db.execute(
-                    text(SQL),
+                    SEARCH_QUERY,
                     {
                         "q": normalized_query,
                         "ruleset_id": scoped_ruleset_ids[0],
@@ -58,5 +68,9 @@ async def search(q: str = Query(..., min_length=1, max_length=200), ruleset_id: 
                 )
             ).mappings().all()
         except SQLAlchemyError:
+            logger.exception(
+                "Search request failed",
+                extra={"ruleset_id": ruleset_id, "user_id": user.id if user else None},
+            )
             raise_api_error(503, "Search is temporarily unavailable. Please try again.", "SEARCH_UNAVAILABLE")
         return [dict(r) for r in rows]

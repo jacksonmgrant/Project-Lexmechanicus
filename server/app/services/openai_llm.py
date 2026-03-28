@@ -10,7 +10,8 @@ def _build_agent_instructions(system: str) -> str:
         f"You are {settings.OPENAI_AGENT_NAME}. "
         "You answer questions about tabletop rules documents and uploaded reference material. "
         "Prefer retrieved evidence over guesswork. "
-        "If the evidence is incomplete or conflicting, say 'uncertain'.\n\n"
+        "Use relevant retrieved snippets to give the best supported answer you can, even when they are partial excerpts. "
+        "Only say 'uncertain' when the retrieved evidence does not answer the user's core question or directly conflicts.\n\n"
         f"{system}"
     )
 
@@ -49,22 +50,19 @@ async def stream_completion(model: str, system: str, user: str, context_chunks: 
     if not api_key:
         raise_api_error(503, "AI responses are not configured right now.", "AI_NOT_CONFIGURED")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if settings.OPENAI_PROJECT_ID:
+        headers["OpenAI-Project"] = settings.OPENAI_PROJECT_ID
+    if settings.OPENAI_ORG_ID:
+        headers["OpenAI-Organization"] = settings.OPENAI_ORG_ID
     payload: dict[str, object] = {
         "model": model,
         "instructions": _build_agent_instructions(system),
         "input": _build_input_items(user, context_chunks),
         "stream": True,
-        "max_output_tokens": 220,
+        "max_output_tokens": 320,
+        "reasoning": {"effort": "minimal"},
+        "text": {"verbosity": "low"},
     }
-    if settings.OPENAI_VECTOR_STORE_ID:
-        payload["tools"] = [
-            {
-                "type": "file_search",
-                "vector_store_ids": [settings.OPENAI_VECTOR_STORE_ID],
-                "max_num_results": 4,
-            }
-        ]
-        payload["tool_choice"] = "auto"
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=payload) as r:
@@ -85,6 +83,12 @@ async def stream_completion(model: str, system: str, user: str, context_chunks: 
                         delta = event.get("delta")
                         if delta:
                             yield delta
+                    elif event_type == "response.incomplete":
+                        details = event.get("response", {}).get("incomplete_details") or {}
+                        reason = details.get("reason")
+                        if reason == "max_output_tokens":
+                            raise_api_error(502, "The AI response ran out of output tokens before it could finish. Please try again.", "AI_RESPONSE_INCOMPLETE")
+                        raise_api_error(502, "The AI response ended before completion. Please try again.", "AI_RESPONSE_INCOMPLETE")
                     elif event_type == "error":
                         message = event.get("message") or "OpenAI streaming error"
                         raise_api_error(502, message, "AI_STREAM_ERROR")

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { FileText, FolderOpen, Menu, MessageSquare, User, X } from 'lucide-react'
 import { useAppContext } from '../context/AppContext'
@@ -15,6 +15,10 @@ export function Root() {
     const { sessionError } = useAppContext()
     const location = useLocation()
     const [open, setOpen] = useState(false)
+
+    useEffect(() => {
+        setOpen(false)
+    }, [location.pathname])
 
     return (
         <div className="template-shell">
@@ -41,7 +45,9 @@ export function Root() {
                         <nav className="template-nav-list">
                             {navigation.map((item) => {
                                 const Icon = item.icon
-                                const isActive = location.pathname === item.path
+                                const isActive = item.path === '/'
+                                    ? location.pathname === item.path
+                                    : (location.pathname === item.path || location.pathname.startsWith(`${item.path}/`))
                                 return (
                                     <Link
                                         key={item.path}
@@ -68,7 +74,9 @@ export function Root() {
                     <nav className="template-desktop-nav">
                         {navigation.map((item) => {
                             const Icon = item.icon
-                            const isActive = location.pathname === item.path
+                            const isActive = item.path === '/'
+                                ? location.pathname === item.path
+                                : (location.pathname === item.path || location.pathname.startsWith(`${item.path}/`))
                             return (
                                 <Link key={item.path} to={item.path} className={`template-nav-tab${isActive ? ' is-active' : ''}`}>
                                     <Icon size={16} />

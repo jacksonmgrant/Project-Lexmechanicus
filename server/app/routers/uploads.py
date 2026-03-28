@@ -17,12 +17,21 @@ from ..auth import get_current_user, get_optional_user
 from ..config import _env_bool, settings
 from ..db import SessionLocal
 from ..errors import raise_api_error
+from ..models import Bundle, BundleFile, SavedBundle, UserRulesetBundle
 from ..models import File as FileModel
-from ..models import FileChunk, FileTag, Folder, GameSystem, Ruleset, RulesetAlias, Tag, User
+from ..models import FileChunk, FileTag, Folder, GameSystem, Ruleset, RulesetAlias, SavedFile, Tag, User
+from ..services.bundles import (
+    build_bundle_access_condition,
+    get_active_bundle_for_ruleset,
+    get_default_bundle_ids,
+    get_saved_bundle_ids,
+    load_accessible_bundle,
+    serialize_bundle,
+)
 from ..services.chunker import iter_chunks
 from ..services.embeddings import embed_texts
 from ..services.openai_vector_store import OpenAIVectorStoreSyncError, sync_file_to_vector_store
-from ..services.parsers import normalize_text
+from ..services.parsers import extract_document_title, normalize_text, should_replace_with_extracted_title
 from ..services.rulesets import (
     DEFAULT_RULESET_NAME,
     DEFAULT_RULESET_SLUG,
@@ -49,7 +58,7 @@ S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_USE_SSL = _env_bool("S3_USE_SSL", False)
 DEFAULT_FOLDER_GAME_SYSTEM_ID = 1
 DEFAULT_FOLDER_NAME = "My Uploads"
-MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_SIZE_BYTES = 75 * 1024 * 1024
 DEFAULT_MIME_BY_EXTENSION = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
@@ -97,12 +106,90 @@ class FileTagsUpdateRequest(BaseModel):
     tag_ids: list[int] = Field(default_factory=list)
 
 
+class FileTitleUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @validator("title")
+    def validate_title(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter a title before saving.")
+        return normalized
+
+
 class FileGameSystemUpdateRequest(BaseModel):
     ruleset_id: int = Field(ge=1)
 
 
 class ActiveGameSystemUpdateRequest(BaseModel):
     ruleset_id: int = Field(ge=1)
+
+
+class BundleCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=1000)
+    ruleset_id: int = Field(ge=1)
+    file_ids: list[int] = Field(default_factory=list)
+    is_public: bool = False
+
+    @validator("title")
+    def validate_title(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter a bundle title.")
+        return normalized
+
+    @validator("description")
+    def validate_description(cls, value: str):
+        return value.strip()
+
+    @validator("file_ids")
+    def validate_file_ids(cls, value: list[int]):
+        normalized_ids: list[int] = []
+        seen: set[int] = set()
+        for item in value:
+            if not isinstance(item, int) or item < 1:
+                raise ValueError("Choose at least one valid file.")
+            if item not in seen:
+                normalized_ids.append(item)
+                seen.add(item)
+        if not normalized_ids:
+            raise ValueError("Choose at least one file for the bundle.")
+        return normalized_ids
+
+
+class ActiveBundleUpdateRequest(BaseModel):
+    ruleset_id: int = Field(ge=1)
+    bundle_id: int | None = Field(default=None, ge=1)
+
+
+class BundleFilesUpdateRequest(BaseModel):
+    file_ids: list[int] = Field(default_factory=list)
+
+    @validator("file_ids")
+    def validate_file_ids(cls, value: list[int]):
+        normalized_ids: list[int] = []
+        seen: set[int] = set()
+        for item in value:
+            if not isinstance(item, int) or item < 1:
+                raise ValueError("Choose at least one valid file.")
+            if item not in seen:
+                normalized_ids.append(item)
+                seen.add(item)
+        if not normalized_ids:
+            raise ValueError("Choose at least one file.")
+        return normalized_ids
+
+
+class BundleTitleUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+    @validator("title")
+    def validate_title(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter a bundle title.")
+        return normalized
 
 
 def _ensure_storage_configured() -> None:
@@ -134,7 +221,7 @@ def _validate_upload_payload(*, folder_id: int, filename: str, data: bytes) -> N
     if not data:
         raise_api_error(422, "The selected file is empty.", "EMPTY_FILE")
     if len(data) > MAX_UPLOAD_SIZE_BYTES:
-        raise_api_error(413, "The selected file is too large. Upload files up to 10 MB.", "FILE_TOO_LARGE")
+        raise_api_error(413, "The selected file is too large. Upload files up to 75 MB.", "FILE_TOO_LARGE")
 
 
 def _handle_storage_client_error(exc: ClientError, *, action: str, missing_code: str | None = None, missing_message: str | None = None) -> None:
@@ -332,6 +419,19 @@ async def _serialize_file_metadata(db, file_ids: list[int]) -> tuple[dict[int, d
     return rulesets, tags_by_file
 
 
+async def _load_saved_file_ids(db, *, user_id: int | None, file_ids: list[int]) -> set[int]:
+    if user_id is None or not file_ids:
+        return set()
+    rows = await db.execute(
+        select(SavedFile.file_id)
+        .where(
+            SavedFile.user_id == user_id,
+            SavedFile.file_id.in_(file_ids),
+        )
+    )
+    return set(rows.scalars().all())
+
+
 async def _load_owned_file(db, *, file_id: int, user_id: int) -> FileModel:
     file_model = await db.scalar(
         select(FileModel)
@@ -341,6 +441,199 @@ async def _load_owned_file(db, *, file_id: int, user_id: int) -> FileModel:
     if file_model is None:
         raise_api_error(404, "File not found.", "FILE_NOT_FOUND")
     return file_model
+
+
+async def _load_accessible_file(db, *, file_id: int, user_id: int) -> FileModel:
+    file_model = await db.scalar(
+        select(FileModel)
+        .join(Folder, Folder.id == FileModel.folder_id)
+        .where(
+            FileModel.id == file_id,
+            build_file_access_condition(user_id=user_id),
+        )
+    )
+    if file_model is None:
+        raise_api_error(404, "File not found.", "FILE_NOT_FOUND")
+    return file_model
+
+
+async def _load_owned_bundle(db, *, bundle_id: int, user_id: int) -> Bundle:
+    bundle = await db.get(Bundle, bundle_id)
+    if bundle is None:
+        raise_api_error(404, "Bundle not found.", "BUNDLE_NOT_FOUND")
+    if bundle.owner_id != user_id:
+        raise_api_error(403, "You do not have permission to edit this bundle.", "BUNDLE_EDIT_FORBIDDEN")
+    return bundle
+
+
+async def _delete_empty_bundles(db, *, bundle_ids: list[int]) -> set[int]:
+    normalized_bundle_ids = sorted({bundle_id for bundle_id in bundle_ids if bundle_id})
+    if not normalized_bundle_ids:
+        return set()
+
+    empty_bundle_ids = set(
+        (
+            await db.execute(
+                select(Bundle.id).where(
+                    Bundle.id.in_(normalized_bundle_ids),
+                    ~select(BundleFile.bundle_id).where(BundleFile.bundle_id == Bundle.id).exists(),
+                )
+            )
+        ).scalars().all()
+    )
+    if not empty_bundle_ids:
+        return set()
+
+    await db.execute(delete(Bundle).where(Bundle.id.in_(empty_bundle_ids)))
+    return empty_bundle_ids
+
+
+async def _delete_empty_bundles_for_file(db, *, file_id: int) -> None:
+    affected_bundle_ids = list(
+        (
+            await db.execute(
+                select(BundleFile.bundle_id).where(BundleFile.file_id == file_id)
+            )
+        ).scalars().all()
+    )
+    if not affected_bundle_ids:
+        return
+
+    await _delete_empty_bundles(db, bundle_ids=affected_bundle_ids)
+
+
+async def _serialize_bundle_detail_payload(db, *, bundle: Bundle, user_id: int) -> dict[str, object]:
+    bundle_owner = await db.get(User, bundle.owner_id)
+    bundle_ruleset = await db.get(Ruleset, bundle.ruleset_id)
+    file_count = int(await db.scalar(select(func.count(BundleFile.file_id)).where(BundleFile.bundle_id == bundle.id)) or 0)
+    saved_bundle_ids = await get_saved_bundle_ids(db, user_id=user_id, bundle_ids=[bundle.id])
+    default_bundle_ids = await get_default_bundle_ids(db, user_id=user_id, bundle_ids=[bundle.id])
+    preview_titles = await _load_bundle_preview_titles(db, bundle_ids=[bundle.id])
+
+    chunk_counts = select(FileChunk.file_id, func.count().label("chunk_count")).group_by(FileChunk.file_id).subquery()
+    save_counts = select(SavedFile.file_id, func.count().label("save_count")).group_by(SavedFile.file_id).subquery()
+    file_rows = (
+        await db.execute(
+            select(
+                FileModel.id,
+                FileModel.title,
+                FileModel.description,
+                FileModel.filename,
+                FileModel.mime_type,
+                FileModel.size_bytes,
+                FileModel.is_public,
+                FileModel.openai_vector_store_status,
+                FileModel.ruleset_id,
+                Folder.id.label("folder_id"),
+                User.display_name.label("uploader_display_name"),
+                chunk_counts.c.chunk_count,
+                save_counts.c.save_count,
+            )
+            .join(BundleFile, BundleFile.file_id == FileModel.id)
+            .join(Folder, Folder.id == FileModel.folder_id)
+            .join(User, User.id == Folder.user_id)
+            .outerjoin(chunk_counts, chunk_counts.c.file_id == FileModel.id)
+            .outerjoin(save_counts, save_counts.c.file_id == FileModel.id)
+            .where(BundleFile.bundle_id == bundle.id)
+            .order_by(BundleFile.sort_order, FileModel.title, FileModel.id)
+        )
+    ).mappings().all()
+
+    file_ids = [row["id"] for row in file_rows]
+    rulesets, tags_by_file = await _serialize_file_metadata(db, file_ids)
+    saved_file_ids = await _load_saved_file_ids(db, user_id=user_id, file_ids=file_ids)
+
+    return {
+        "bundle": serialize_bundle(
+            bundle,
+            ruleset=bundle_ruleset,
+            owner=bundle_owner,
+            file_count=file_count,
+            is_saved=bundle.id in saved_bundle_ids,
+            is_default=bundle.id in default_bundle_ids,
+            preview_titles=preview_titles.get(bundle.id, []),
+        ),
+        "files": [
+            _serialize_file_listing_row(
+                row,
+                rulesets=rulesets,
+                tags_by_file=tags_by_file,
+                saved_file_ids=saved_file_ids,
+            )
+            for row in file_rows
+        ],
+    }
+
+
+async def _serialize_active_bundle_payload(db, *, user_id: int | None, ruleset_id: int | None) -> dict[str, object] | None:
+    active_bundle = await get_active_bundle_for_ruleset(db, user_id=user_id, ruleset_id=ruleset_id)
+    if active_bundle is None:
+        return None
+
+    bundle_owner = await db.get(User, active_bundle.owner_id)
+    bundle_ruleset = await db.get(Ruleset, active_bundle.ruleset_id)
+    file_count = int(
+        await db.scalar(
+            select(func.count(BundleFile.file_id)).where(BundleFile.bundle_id == active_bundle.id)
+        )
+        or 0
+    )
+    is_saved = active_bundle.owner_id == user_id or active_bundle.id in await get_saved_bundle_ids(db, user_id=user_id, bundle_ids=[active_bundle.id])
+    return serialize_bundle(
+        active_bundle,
+        ruleset=bundle_ruleset,
+        owner=bundle_owner,
+        file_count=file_count,
+        is_saved=is_saved,
+        is_default=True,
+    )
+
+
+async def _load_bundle_preview_titles(db, *, bundle_ids: list[int], limit_per_bundle: int = 4) -> dict[int, list[str]]:
+    if not bundle_ids:
+        return {}
+
+    rows = (
+        await db.execute(
+            select(BundleFile.bundle_id, FileModel.title)
+            .join(FileModel, FileModel.id == BundleFile.file_id)
+            .where(BundleFile.bundle_id.in_(bundle_ids))
+            .order_by(BundleFile.bundle_id, BundleFile.sort_order, FileModel.title, FileModel.id)
+        )
+    ).all()
+    preview_by_bundle: dict[int, list[str]] = {}
+    for bundle_id, title in rows:
+        titles = preview_by_bundle.setdefault(bundle_id, [])
+        if len(titles) < limit_per_bundle:
+            titles.append(title)
+    return preview_by_bundle
+
+
+def _serialize_file_listing_row(
+    row,
+    *,
+    rulesets: dict[int, dict[str, object] | None],
+    tags_by_file: dict[int, list[dict[str, object]]],
+    saved_file_ids: set[int],
+) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "description": row["description"],
+        "filename": row["filename"],
+        "mime_type": row["mime_type"],
+        "size_bytes": row["size_bytes"],
+        "is_public": row["is_public"],
+        "is_saved": row["id"] in saved_file_ids,
+        "status": row["openai_vector_store_status"] or "ready",
+        "folder_id": row["folder_id"],
+        "game_system": rulesets.get(row["id"]),
+        "game_system_id": row["ruleset_id"],
+        "tags": tags_by_file.get(row["id"], []),
+        "uploader_name": row["uploader_display_name"] or "Anonymous",
+        "chunk_count": row["chunk_count"] or 0,
+        "save_count": row["save_count"] or 0,
+    }
 
 
 @router.get("/tags")
@@ -379,6 +672,11 @@ async def list_game_systems(user=Depends(get_optional_user)):
     async with SessionLocal() as db:
         try:
             active_ruleset, available_rulesets = await get_active_ruleset(db, user_id=user.id if user else None)
+            active_bundle = await _serialize_active_bundle_payload(
+                db,
+                user_id=user.id if user else None,
+                ruleset_id=active_ruleset.id if active_ruleset else None,
+            )
             if user is not None:
                 await db.commit()
         except SQLAlchemyError:
@@ -388,6 +686,7 @@ async def list_game_systems(user=Depends(get_optional_user)):
     return {
         "active_game_system": serialize_ruleset(active_ruleset),
         "available_game_systems": [serialize_ruleset(ruleset) for ruleset in available_rulesets],
+        "active_bundle": active_bundle,
     }
 
 
@@ -439,6 +738,11 @@ async def update_active_game_system(body: ActiveGameSystemUpdateRequest, user=De
             await db.commit()
 
             active_ruleset, refreshed_rulesets = await get_active_ruleset(db, user_id=user.id)
+            active_bundle = await _serialize_active_bundle_payload(
+                db,
+                user_id=user.id,
+                ruleset_id=active_ruleset.id if active_ruleset else None,
+            )
         except SQLAlchemyError:
             await db.rollback()
             logger.exception("Active ruleset update failed", extra={"user_id": user.id, "ruleset_id": body.ruleset_id})
@@ -446,7 +750,420 @@ async def update_active_game_system(body: ActiveGameSystemUpdateRequest, user=De
     return {
         "active_game_system": serialize_ruleset(active_ruleset),
         "available_game_systems": [serialize_ruleset(ruleset) for ruleset in refreshed_rulesets],
+        "active_bundle": active_bundle,
     }
+
+
+@router.get("/bundles")
+async def list_bundles(
+    scope: str = Query("browse", pattern="^(browse|mine|saved)$"),
+    q: str = Query("", max_length=200),
+    ruleset_id: int | None = Query(None, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    user=Depends(get_optional_user),
+):
+    if scope in {"mine", "saved"} and user is None:
+        raise_api_error(401, "Create an account or sign in to use this feature.", "AUTH_REQUIRED")
+
+    async with SessionLocal() as db:
+        try:
+            _, scoped_ruleset_ids = await get_ruleset_scope_ids(db, ruleset_id=ruleset_id)
+            if ruleset_id is not None and scoped_ruleset_ids == []:
+                raise_api_error(422, "Choose a valid game system.", "RULESET_NOT_FOUND")
+
+            bundle_counts = select(BundleFile.bundle_id, func.count().label("file_count")).group_by(BundleFile.bundle_id).subquery()
+            bundle_save_counts = select(SavedBundle.bundle_id, func.count().label("save_count")).group_by(SavedBundle.bundle_id).subquery()
+            stmt = (
+                select(Bundle, Ruleset, User, bundle_counts.c.file_count, bundle_save_counts.c.save_count)
+                .join(Ruleset, Ruleset.id == Bundle.ruleset_id)
+                .join(User, User.id == Bundle.owner_id)
+                .outerjoin(bundle_counts, bundle_counts.c.bundle_id == Bundle.id)
+                .outerjoin(bundle_save_counts, bundle_save_counts.c.bundle_id == Bundle.id)
+                .order_by(Bundle.id.desc())
+                .limit(limit)
+            )
+
+            if scope == "mine":
+                stmt = stmt.where(Bundle.owner_id == user.id)
+            elif scope == "saved":
+                stmt = (
+                    stmt.join(SavedBundle, SavedBundle.bundle_id == Bundle.id)
+                    .where(
+                        SavedBundle.user_id == user.id,
+                        build_bundle_access_condition(user_id=user.id),
+                    )
+                )
+            else:
+                stmt = stmt.where(build_bundle_access_condition(user_id=user.id if user else None))
+
+            if scoped_ruleset_ids is not None:
+                stmt = stmt.where(Bundle.ruleset_id.in_(scoped_ruleset_ids))
+
+            normalized_q = q.strip().lower()
+            if normalized_q:
+                file_title_match = (
+                    select(BundleFile.bundle_id)
+                    .join(FileModel, FileModel.id == BundleFile.file_id)
+                    .where(
+                        BundleFile.bundle_id == Bundle.id,
+                        or_(
+                            func.lower(FileModel.title).like(f"%{normalized_q}%"),
+                            func.lower(FileModel.filename).like(f"%{normalized_q}%"),
+                        ),
+                    )
+                    .exists()
+                )
+                stmt = stmt.where(
+                    or_(
+                        func.lower(Bundle.title).like(f"%{normalized_q}%"),
+                        func.lower(func.coalesce(Bundle.description, "")).like(f"%{normalized_q}%"),
+                        func.cast(Bundle.id, Text) == normalized_q,
+                        file_title_match,
+                    )
+                )
+
+            rows = (await db.execute(stmt)).all()
+            bundles = [row[0] for row in rows]
+            bundle_ids = [bundle.id for bundle in bundles]
+            preview_by_bundle = await _load_bundle_preview_titles(db, bundle_ids=bundle_ids)
+            saved_bundle_ids = set(bundle_ids) if scope == "saved" and user is not None else await get_saved_bundle_ids(
+                db,
+                user_id=user.id if user else None,
+                bundle_ids=bundle_ids,
+            )
+            default_bundle_ids = await get_default_bundle_ids(
+                db,
+                user_id=user.id if user else None,
+                bundle_ids=bundle_ids,
+            )
+        except SQLAlchemyError:
+            logger.exception("Bundle listing failed", extra={"scope": scope, "user_id": user.id if user else None, "ruleset_id": ruleset_id})
+            raise_api_error(503, "The bundle list is temporarily unavailable. Please try again.", "BUNDLE_LIST_UNAVAILABLE")
+
+    return [
+        serialize_bundle(
+            bundle,
+            ruleset=ruleset,
+            owner=owner,
+            file_count=int(file_count or 0),
+            save_count=int(save_count or 0),
+            is_saved=bundle.id in saved_bundle_ids,
+            is_default=bundle.id in default_bundle_ids,
+            preview_titles=preview_by_bundle.get(bundle.id, []),
+        )
+        for bundle, ruleset, owner, file_count, save_count in rows
+    ]
+
+
+@router.post("/bundles")
+async def create_bundle(body: BundleCreateRequest, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            selected_ruleset = await _resolve_ruleset(db, requested_ruleset_id=body.ruleset_id, user_id=user.id)
+            file_rows = (
+                await db.execute(
+                    select(FileModel.id, FileModel.ruleset_id, FileModel.is_public)
+                    .join(Folder, Folder.id == FileModel.folder_id)
+                    .where(
+                        FileModel.id.in_(body.file_ids),
+                        build_file_access_condition(user_id=user.id),
+                    )
+                )
+            ).all()
+            files_by_id = {file_id: {"ruleset_id": file_ruleset_id, "is_public": is_public} for file_id, file_ruleset_id, is_public in file_rows}
+
+            missing_ids = [file_id for file_id in body.file_ids if file_id not in files_by_id]
+            if missing_ids:
+                raise_api_error(422, "One or more selected files are no longer available.", "BUNDLE_FILES_NOT_FOUND")
+
+            invalid_ruleset_ids = [file_id for file_id in body.file_ids if files_by_id[file_id]["ruleset_id"] != selected_ruleset.id]
+            if invalid_ruleset_ids:
+                raise_api_error(422, "Every file in a bundle must belong to the selected game system.", "BUNDLE_RULESET_MISMATCH")
+
+            if body.is_public and any(not files_by_id[file_id]["is_public"] for file_id in body.file_ids):
+                raise_api_error(422, "Public bundles can only include public files.", "BUNDLE_PUBLIC_FILES_REQUIRED")
+
+            created_bundle_id = (
+                await db.execute(
+                    insert(Bundle)
+                    .values(
+                        {
+                            "owner_id": user.id,
+                            "ruleset_id": selected_ruleset.id,
+                            "title": body.title,
+                            "description": body.description or None,
+                            "is_public": body.is_public,
+                        }
+                    )
+                    .returning(Bundle.id)
+                )
+            ).scalar_one()
+
+            await db.execute(
+                insert(BundleFile),
+                [
+                    {
+                        "bundle_id": created_bundle_id,
+                        "file_id": file_id,
+                        "sort_order": index,
+                    }
+                    for index, file_id in enumerate(body.file_ids)
+                ],
+            )
+            await db.commit()
+
+            created_bundle = await db.get(Bundle, created_bundle_id)
+            bundle_owner = await db.get(User, user.id)
+        except IntegrityError:
+            await db.rollback()
+            raise_api_error(409, "You already have a bundle with that title for this game system.", "BUNDLE_TITLE_CONFLICT")
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Bundle creation failed", extra={"user_id": user.id, "ruleset_id": body.ruleset_id})
+            raise_api_error(503, "The bundle could not be created right now. Please try again.", "BUNDLE_CREATE_FAILED")
+
+    return serialize_bundle(
+        created_bundle,
+        ruleset=selected_ruleset,
+        owner=bundle_owner,
+        file_count=len(body.file_ids),
+        is_saved=False,
+        is_default=False,
+    )
+
+
+@router.get("/bundles/{bundle_id}")
+async def get_bundle_detail(bundle_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await _load_owned_bundle(db, bundle_id=bundle_id, user_id=user.id)
+            payload = await _serialize_bundle_detail_payload(db, bundle=bundle, user_id=user.id)
+        except SQLAlchemyError:
+            logger.exception("Bundle detail load failed", extra={"bundle_id": bundle_id, "user_id": user.id})
+            raise_api_error(503, "The bundle could not be loaded right now.", "BUNDLE_DETAIL_FAILED")
+    return payload
+
+
+@router.post("/bundles/{bundle_id}/files")
+async def add_files_to_bundle(bundle_id: int, body: BundleFilesUpdateRequest, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await _load_owned_bundle(db, bundle_id=bundle_id, user_id=user.id)
+            file_rows = (
+                await db.execute(
+                    select(FileModel.id, FileModel.ruleset_id, FileModel.is_public)
+                    .join(Folder, Folder.id == FileModel.folder_id)
+                    .where(
+                        FileModel.id.in_(body.file_ids),
+                        build_file_access_condition(user_id=user.id),
+                    )
+                )
+            ).all()
+            files_by_id = {file_id: {"ruleset_id": ruleset_id, "is_public": is_public} for file_id, ruleset_id, is_public in file_rows}
+
+            missing_ids = [file_id for file_id in body.file_ids if file_id not in files_by_id]
+            if missing_ids:
+                raise_api_error(422, "One or more selected files are no longer available.", "BUNDLE_FILES_NOT_FOUND")
+
+            invalid_ruleset_ids = [file_id for file_id in body.file_ids if files_by_id[file_id]["ruleset_id"] != bundle.ruleset_id]
+            if invalid_ruleset_ids:
+                raise_api_error(422, "Every file in a bundle must belong to the bundle's game system.", "BUNDLE_RULESET_MISMATCH")
+
+            if bundle.is_public and any(not files_by_id[file_id]["is_public"] for file_id in body.file_ids):
+                raise_api_error(422, "Public bundles can only include public files.", "BUNDLE_PUBLIC_FILES_REQUIRED")
+
+            existing_file_ids = set(
+                (
+                    await db.execute(
+                        select(BundleFile.file_id).where(BundleFile.bundle_id == bundle.id)
+                    )
+                ).scalars().all()
+            )
+            new_file_ids = [file_id for file_id in body.file_ids if file_id not in existing_file_ids]
+
+            if new_file_ids:
+                next_sort_order = int(
+                    await db.scalar(
+                        select(func.max(BundleFile.sort_order)).where(BundleFile.bundle_id == bundle.id)
+                    )
+                    or -1
+                ) + 1
+                await db.execute(
+                    insert(BundleFile),
+                    [
+                        {
+                            "bundle_id": bundle.id,
+                            "file_id": file_id,
+                            "sort_order": next_sort_order + index,
+                        }
+                        for index, file_id in enumerate(new_file_ids)
+                    ],
+                )
+            await db.commit()
+            payload = await _serialize_bundle_detail_payload(db, bundle=bundle, user_id=user.id)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Bundle file add failed", extra={"bundle_id": bundle_id, "user_id": user.id})
+            raise_api_error(503, "The bundle could not be updated right now.", "BUNDLE_FILE_ADD_FAILED")
+    return payload
+
+
+@router.post("/bundles/{bundle_id}/saved")
+async def save_bundle(bundle_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await load_accessible_bundle(db, bundle_id=bundle_id, user_id=user.id)
+            if bundle is None:
+                raise_api_error(404, "Bundle not found.", "BUNDLE_NOT_FOUND")
+            existing = await db.scalar(
+                select(SavedBundle.id).where(
+                    SavedBundle.user_id == user.id,
+                    SavedBundle.bundle_id == bundle_id,
+                )
+            )
+            if existing is None:
+                db.add(SavedBundle(user_id=user.id, bundle_id=bundle_id))
+                await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The bundle could not be saved right now.", "BUNDLE_SAVE_FAILED")
+    return {"saved": True}
+
+
+@router.delete("/bundles/{bundle_id}/saved")
+async def unsave_bundle(bundle_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            await db.execute(
+                delete(SavedBundle).where(
+                    SavedBundle.user_id == user.id,
+                    SavedBundle.bundle_id == bundle_id,
+                )
+            )
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The bundle could not be unsaved right now.", "BUNDLE_UNSAVE_FAILED")
+    return {"saved": False}
+
+
+@router.delete("/bundles/{bundle_id}/files/{file_id}")
+async def remove_file_from_bundle(bundle_id: int, file_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await _load_owned_bundle(db, bundle_id=bundle_id, user_id=user.id)
+            result = await db.execute(
+                delete(BundleFile).where(
+                    BundleFile.bundle_id == bundle.id,
+                    BundleFile.file_id == file_id,
+                )
+            )
+            if not result.rowcount:
+                raise_api_error(404, "That file is not in the bundle.", "BUNDLE_FILE_NOT_FOUND")
+
+            deleted_bundle_ids = await _delete_empty_bundles(db, bundle_ids=[bundle.id])
+            await db.commit()
+
+            if bundle.id in deleted_bundle_ids:
+                return {"deleted": True}
+
+            payload = await _serialize_bundle_detail_payload(db, bundle=bundle, user_id=user.id)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Bundle file removal failed", extra={"bundle_id": bundle_id, "file_id": file_id, "user_id": user.id})
+            raise_api_error(503, "The bundle could not be updated right now.", "BUNDLE_FILE_REMOVE_FAILED")
+    return {"deleted": False, **payload}
+
+
+@router.put("/bundles/{bundle_id}/title")
+async def update_bundle_title(bundle_id: int, body: BundleTitleUpdateRequest, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await db.get(Bundle, bundle_id)
+            if bundle is None:
+                raise_api_error(404, "Bundle not found.", "BUNDLE_NOT_FOUND")
+            if bundle.owner_id != user.id:
+                raise_api_error(403, "You do not have permission to edit this bundle.", "BUNDLE_EDIT_FORBIDDEN")
+            bundle.title = body.title
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise_api_error(409, "You already have a bundle with that title for this game system.", "BUNDLE_TITLE_CONFLICT")
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The bundle title could not be updated right now.", "BUNDLE_TITLE_UPDATE_FAILED")
+    return {"title": body.title}
+
+
+@router.put("/bundles/active")
+async def update_active_bundle(body: ActiveBundleUpdateRequest, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            ruleset = await db.get(Ruleset, body.ruleset_id)
+            if ruleset is None:
+                raise_api_error(422, "Choose a valid game system.", "RULESET_NOT_FOUND")
+
+            if body.bundle_id is None:
+                await db.execute(
+                    delete(UserRulesetBundle).where(
+                        UserRulesetBundle.user_id == user.id,
+                        UserRulesetBundle.ruleset_id == ruleset.id,
+                    )
+                )
+                await db.commit()
+                return {"active_bundle": None}
+
+            bundle = await load_accessible_bundle(db, bundle_id=body.bundle_id, user_id=user.id, ruleset_id=ruleset.id)
+            if bundle is None:
+                raise_api_error(422, "Choose a valid bundle for that game system.", "BUNDLE_NOT_FOUND")
+
+            existing = await db.scalar(
+                select(UserRulesetBundle).where(
+                    UserRulesetBundle.user_id == user.id,
+                    UserRulesetBundle.ruleset_id == ruleset.id,
+                )
+            )
+            if existing is None:
+                db.add(UserRulesetBundle(user_id=user.id, ruleset_id=ruleset.id, bundle_id=bundle.id))
+            else:
+                existing.bundle_id = bundle.id
+            await db.commit()
+
+            bundle_owner = await db.get(User, bundle.owner_id)
+            saved_bundle_ids = await get_saved_bundle_ids(db, user_id=user.id, bundle_ids=[bundle.id])
+            file_count = int(await db.scalar(select(func.count(BundleFile.file_id)).where(BundleFile.bundle_id == bundle.id)) or 0)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Active bundle update failed", extra={"user_id": user.id, "ruleset_id": body.ruleset_id, "bundle_id": body.bundle_id})
+            raise_api_error(503, "The active bundle could not be updated right now.", "BUNDLE_ACTIVE_UPDATE_FAILED")
+
+    return {
+        "active_bundle": serialize_bundle(
+            bundle,
+            ruleset=ruleset,
+            owner=bundle_owner,
+            file_count=file_count,
+            is_saved=bundle.id in saved_bundle_ids,
+            is_default=True,
+        )
+    }
+
+
+@router.delete("/bundles/{bundle_id}")
+async def delete_bundle(bundle_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            bundle = await db.get(Bundle, bundle_id)
+            if bundle is None:
+                raise_api_error(404, "Bundle not found.", "BUNDLE_NOT_FOUND")
+            if bundle.owner_id != user.id:
+                raise_api_error(403, "You do not have permission to delete this bundle.", "BUNDLE_DELETE_FORBIDDEN")
+            await db.execute(delete(Bundle).where(Bundle.id == bundle_id))
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The bundle could not be deleted right now.", "BUNDLE_DELETE_FAILED")
+    return {"status": "ok"}
 
 
 @router.post("/")
@@ -476,6 +1193,11 @@ async def upload_file(
         raise_api_error(400, "The uploaded file could not be read.", "FILE_READ_FAILED")
 
     _validate_upload_payload(folder_id=folder_id, filename=normalized_filename, data=data)
+
+    if should_replace_with_extracted_title(normalized_title, normalized_filename):
+        extracted_title = extract_document_title(normalized_mime_type, data, normalized_filename)
+        if extracted_title:
+            normalized_title = extracted_title
 
     try:
         text_content = normalize_text(normalized_mime_type, data)
@@ -607,13 +1329,13 @@ async def upload_file(
 
 @router.get("/files")
 async def list_files(
-    scope: str = Query("browse", pattern="^(browse|mine)$"),
+    scope: str = Query("browse", pattern="^(browse|mine|saved)$"),
     q: str = Query("", max_length=200),
     ruleset_id: int | None = Query(None, ge=1),
     limit: int = Query(50, ge=1, le=100),
     user=Depends(get_optional_user),
 ):
-    if scope == "mine" and user is None:
+    if scope in {"mine", "saved"} and user is None:
         raise_api_error(401, "Create an account or sign in to use this feature.", "AUTH_REQUIRED")
 
     async with SessionLocal() as db:
@@ -623,6 +1345,7 @@ async def list_files(
                 raise_api_error(422, "Choose a valid game system.", "RULESET_NOT_FOUND")
 
             chunk_counts = select(FileChunk.file_id, func.count().label("chunk_count")).group_by(FileChunk.file_id).subquery()
+            save_counts = select(SavedFile.file_id, func.count().label("save_count")).group_by(SavedFile.file_id).subquery()
             stmt = (
                 select(
                     FileModel.id,
@@ -635,22 +1358,31 @@ async def list_files(
                     FileModel.openai_vector_store_status,
                     FileModel.ruleset_id,
                     Folder.id.label("folder_id"),
-                    User.email.label("uploader_email"),
                     User.display_name.label("uploader_display_name"),
                     chunk_counts.c.chunk_count,
+                    save_counts.c.save_count,
                 )
                 .join(Folder, Folder.id == FileModel.folder_id)
                 .join(User, User.id == Folder.user_id)
                 .outerjoin(chunk_counts, chunk_counts.c.file_id == FileModel.id)
+                .outerjoin(save_counts, save_counts.c.file_id == FileModel.id)
                 .order_by(FileModel.id.desc())
                 .limit(limit)
             )
 
             if scope == "mine":
                 stmt = stmt.where(Folder.user_id == user.id)
+            elif scope == "saved":
+                stmt = (
+                    stmt.join(SavedFile, SavedFile.file_id == FileModel.id)
+                    .where(
+                        SavedFile.user_id == user.id,
+                        build_file_access_condition(user_id=user.id),
+                    )
+                )
             else:
                 if user is not None:
-                    stmt = stmt.where(or_(FileModel.is_public.is_(True), Folder.user_id == user.id))
+                    stmt = stmt.where(build_file_access_condition(user_id=user.id))
                 else:
                     stmt = stmt.where(FileModel.is_public.is_(True))
 
@@ -693,32 +1425,61 @@ async def list_files(
             rows = (await db.execute(stmt)).mappings().all()
             file_ids = [row["id"] for row in rows]
             rulesets, tags_by_file = await _serialize_file_metadata(db, file_ids)
+            saved_file_ids = set(file_ids) if scope == "saved" and user is not None else await _load_saved_file_ids(
+                db,
+                user_id=user.id if user else None,
+                file_ids=file_ids,
+            )
         except SQLAlchemyError:
             logger.exception("File listing failed", extra={"scope": scope, "user_id": user.id if user else None, "ruleset_id": ruleset_id})
             raise_api_error(503, "The file list is temporarily unavailable. Please try again.", "FILE_LIST_UNAVAILABLE")
 
     return [
-        {
-            "id": row["id"],
-            "title": row["title"],
-            "description": row["description"],
-            "filename": row["filename"],
-            "mime_type": row["mime_type"],
-            "size_bytes": row["size_bytes"],
-            "is_public": row["is_public"],
-            "status": row["openai_vector_store_status"] or "ready",
-            "folder_id": row["folder_id"],
-            "game_system": rulesets.get(row["id"]),
-            "game_system_id": row["ruleset_id"],
-            "tags": tags_by_file.get(row["id"], []),
-            "uploader_email": row["uploader_email"],
-            "uploader_name": row["uploader_display_name"] or row["uploader_email"],
-            "chunk_count": row["chunk_count"] or 0,
-            "downloads": 0,
-            "views": 0,
-        }
+        _serialize_file_listing_row(
+            row,
+            rulesets=rulesets,
+            tags_by_file=tags_by_file,
+            saved_file_ids=saved_file_ids,
+        )
         for row in rows
     ]
+
+
+@router.post("/{file_id}/saved")
+async def save_file(file_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            await _load_accessible_file(db, file_id=file_id, user_id=user.id)
+            existing = await db.scalar(
+                select(SavedFile.id).where(
+                    SavedFile.user_id == user.id,
+                    SavedFile.file_id == file_id,
+                )
+            )
+            if existing is None:
+                db.add(SavedFile(user_id=user.id, file_id=file_id))
+                await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The file could not be saved right now.", "FILE_SAVE_FAILED")
+    return {"saved": True}
+
+
+@router.delete("/{file_id}/saved")
+async def unsave_file(file_id: int, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            await db.execute(
+                delete(SavedFile).where(
+                    SavedFile.user_id == user.id,
+                    SavedFile.file_id == file_id,
+                )
+            )
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The file could not be unsaved right now.", "FILE_UNSAVE_FAILED")
+    return {"saved": False}
 
 
 @router.put("/{file_id}/tags")
@@ -736,6 +1497,19 @@ async def update_file_tags(file_id: int, body: FileTagsUpdateRequest, user=Depen
             await db.rollback()
             raise_api_error(503, "The file tags could not be updated right now.", "FILE_TAG_UPDATE_FAILED")
     return {"tags": [serialize_tag(tag) for tag in tags]}
+
+
+@router.put("/{file_id}/title")
+async def update_file_title(file_id: int, body: FileTitleUpdateRequest, user=Depends(get_current_user)):
+    async with SessionLocal() as db:
+        try:
+            file_model = await _load_owned_file(db, file_id=file_id, user_id=user.id)
+            file_model.title = body.title
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            raise_api_error(503, "The file title could not be updated right now.", "FILE_TITLE_UPDATE_FAILED")
+    return {"title": body.title}
 
 
 @router.put("/{file_id}/game-system")
@@ -767,6 +1541,7 @@ async def delete_file(file_id: int, user=Depends(get_current_user)):
                 raise_api_error(403, "You do not have permission to delete this file.", "FILE_DELETE_FORBIDDEN")
             await _delete_file_from_storage(file_model.s3_key)
             await db.execute(delete(FileModel).where(FileModel.id == file_id))
+            await _delete_empty_bundles_for_file(db, file_id=file_id)
             await db.commit()
         except SQLAlchemyError:
             await db.rollback()

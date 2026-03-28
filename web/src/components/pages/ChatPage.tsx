@@ -1,26 +1,81 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send } from 'lucide-react'
-import { useAppContext } from '../../context/AppContext'
-import { getErrorMessage } from '../../lib/api'
+import { Send, X } from 'lucide-react'
+import { ChatCitation, useAppContext } from '../../context/AppContext'
+import { apiErrorFromPayload, getErrorMessage, readResponsePayload } from '../../lib/api'
 
 type Message = {
     id: string
     role: 'user' | 'assistant'
     content: string
+    citations?: ChatCitation[]
+}
+
+function normalizeAssistantText(content: string): string {
+    return content
+        .replace(/([a-zA-Z])(\d)/g, '$1 $2')
+        .replace(/(\d)([a-zA-Z])/g, '$1 $2')
+        .replace(/\s+([.,!?;:])/g, '$1')
+        .replace(/ {2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+}
+
+function truncateDocumentTitle(title: string): string {
+    return title.length > 20 ? `${title.slice(0, 17)}...` : title
+}
+
+function renderAssistantMessage(
+    content: string,
+    citations: ChatCitation[],
+    onOpenCitation: (citation: ChatCitation) => void,
+): React.ReactNode {
+    const citationsById = new Map(citations.map((citation) => [citation.id, citation]))
+    const prepared = content
+        .replace(/(\S)(\[\[c\d+\]\])/g, '$1 $2')
+        .replace(/(\[\[c\d+\]\])(?=\S)/g, '$1 ')
+        .trim()
+    const parts = prepared.split(/(\[\[c\d+\]\])/g)
+
+    return parts.map((part, index) => {
+        const match = part.match(/^\[\[(c\d+)\]\]$/)
+        if (!match) {
+            return <span key={`text-${index}`}>{normalizeAssistantText(part)}</span>
+        }
+
+        const citation = citationsById.get(match[1])
+        if (!citation) {
+            return null
+        }
+
+        return (
+            <button
+                key={`citation-${citation.id}-${index}`}
+                type="button"
+                className="chat-citation"
+                onClick={() => onOpenCitation(citation)}
+            >
+                (<strong>{truncateDocumentTitle(citation.document_title)}</strong>: page {citation.page_number || 1})
+            </button>
+        )
+    })
 }
 
 export function ChatPage() {
-    const { activeGameSystem, streamAsk, session } = useAppContext()
+    const { activeBundle, activeGameSystem, apiBase, guestId, session, streamAsk, token } = useAppContext()
     const [messages, setMessages] = useState<Message[]>([
         {
             id: '1',
             role: 'assistant',
             content: "Hello! Welcome to Lexmechanicus. Ask me anything about the files tied to your current game system.",
+            citations: [],
         },
     ])
     const [input, setInput] = useState('')
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState('')
+    const [viewerCitation, setViewerCitation] = useState<ChatCitation | null>(null)
+    const [viewerUrl, setViewerUrl] = useState('')
+    const [viewerLoading, setViewerLoading] = useState(false)
+    const [viewerError, setViewerError] = useState('')
     const scrollRef = useRef<HTMLDivElement>(null)
 
     useEffect(() => {
@@ -28,6 +83,58 @@ export function ChatPage() {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight
         }
     }, [messages])
+
+    useEffect(() => {
+        if (!viewerCitation) {
+            setViewerUrl('')
+            setViewerError('')
+            setViewerLoading(false)
+            return
+        }
+
+        let cancelled = false
+        let objectUrl = ''
+
+        const loadDocument = async () => {
+            setViewerLoading(true)
+            setViewerError('')
+            setViewerUrl('')
+
+            try {
+                const headers: Record<string, string> = {}
+                if (guestId.trim()) headers['X-Guest-Id'] = guestId
+                if (token.trim()) headers.Authorization = `Bearer ${token}`
+                const response = await fetch(`${apiBase}/viewer/${viewerCitation.file_id}`, { headers })
+                if (!response.ok) {
+                    const payload = await readResponsePayload(response)
+                    throw apiErrorFromPayload(payload, response.status, 'Unable to load the cited document.')
+                }
+
+                const blob = await response.blob()
+                objectUrl = URL.createObjectURL(blob)
+                if (!cancelled) {
+                    setViewerUrl(objectUrl)
+                }
+            } catch (nextError) {
+                if (!cancelled) {
+                    setViewerError(getErrorMessage(nextError, 'Unable to load the cited document.'))
+                }
+            } finally {
+                if (!cancelled) {
+                    setViewerLoading(false)
+                }
+            }
+        }
+
+        loadDocument().catch(() => undefined)
+
+        return () => {
+            cancelled = true
+            if (objectUrl) {
+                URL.revokeObjectURL(objectUrl)
+            }
+        }
+    }, [apiBase, guestId, token, viewerCitation])
 
     const handleSend = async () => {
         const normalizedInput = input.trim()
@@ -52,38 +159,57 @@ export function ChatPage() {
         }
 
         const assistantId = (Date.now() + 1).toString()
+        let latestCitations: ChatCitation[] = []
         setMessages((prev) => [...prev, userMessage])
         setInput('')
         setError('')
         setIsLoading(true)
 
         try {
-            await streamAsk(userMessage.content, (delta) => {
-                setMessages((prev) => {
-                    const assistantMessage = prev.find((message) => message.id === assistantId)
-                    if (!assistantMessage) {
-                        return [...prev, { id: assistantId, role: 'assistant', content: delta }]
-                    }
+            await streamAsk(
+                userMessage.content,
+                (delta) => {
+                    setMessages((prev) => {
+                        const assistantMessage = prev.find((message) => message.id === assistantId)
+                        if (!assistantMessage) {
+                            return [...prev, { id: assistantId, role: 'assistant', content: delta, citations: latestCitations }]
+                        }
 
-                    return prev.map((message) =>
-                        message.id === assistantId
-                            ? { ...message, content: message.content + delta }
-                            : message,
-                    )
-                })
-            })
+                        return prev.map((message) =>
+                            message.id === assistantId
+                                ? { ...message, content: message.content + delta }
+                                : message,
+                        )
+                    })
+                },
+                (citations) => {
+                    latestCitations = citations
+                    setMessages((prev) => {
+                        const assistantMessage = prev.find((message) => message.id === assistantId)
+                        if (!assistantMessage) {
+                            return prev
+                        }
+
+                        return prev.map((message) =>
+                            message.id === assistantId
+                                ? { ...message, citations }
+                                : message,
+                        )
+                    })
+                },
+            )
             setMessages((prev) => {
                 const assistantMessage = prev.find((message) => message.id === assistantId)
                 if (assistantMessage) return prev
-                return [...prev, { id: assistantId, role: 'assistant', content: 'No answer was returned for that question.' }]
+                return [...prev, { id: assistantId, role: 'assistant', content: 'No answer was returned for that question.', citations: [] }]
             })
-        } catch (error) {
-            const detail = getErrorMessage(error, 'Unable to complete the request.')
+        } catch (nextError) {
+            const detail = getErrorMessage(nextError, 'Unable to complete the request.')
             setError(detail)
             setMessages((prev) => {
                 const assistantMessage = prev.find((message) => message.id === assistantId)
                 if (!assistantMessage) {
-                    return [...prev, { id: assistantId, role: 'assistant', content: detail }]
+                    return [...prev, { id: assistantId, role: 'assistant', content: detail, citations: [] }]
                 }
 
                 return prev.map((message) =>
@@ -109,7 +235,11 @@ export function ChatPage() {
                     {messages.map((message) => (
                         <div key={message.id} className={`message-row message-row--${message.role}`}>
                             <div className={`message-bubble message-bubble--${message.role}`}>
-                                <p>{message.content}</p>
+                                <p>
+                                    {message.role === 'assistant'
+                                        ? renderAssistantMessage(message.content, message.citations || [], setViewerCitation)
+                                        : message.content}
+                                </p>
                             </div>
                         </div>
                     ))}
@@ -150,9 +280,11 @@ export function ChatPage() {
                         </button>
                     </div>
                     <p className="page-caption">
-                        {session?.authenticated
-                            ? `Using your uploaded and saved files for ${activeGameSystem?.name || 'your selected game system'}`
-                            : `Using public files for ${activeGameSystem?.name || 'your selected game system'}`}
+                        {activeBundle
+                            ? `Using bundle "${activeBundle.title}" for ${activeGameSystem?.name || 'your selected game system'}`
+                            : session?.authenticated
+                                ? `Using your uploaded and saved files for ${activeGameSystem?.name || 'your selected game system'}`
+                                : `Using public files for ${activeGameSystem?.name || 'your selected game system'}`}
                     </p>
                     {error && (
                         <div className="notice notice--error" role="alert">
@@ -161,6 +293,40 @@ export function ChatPage() {
                     )}
                 </div>
             </div>
+
+            {viewerCitation && (
+                <div className="viewer-sheet" role="dialog" aria-modal="true">
+                    <button className="viewer-sheet__overlay" type="button" aria-label="Close citation viewer" onClick={() => setViewerCitation(null)} />
+                    <div className="viewer-sheet__panel">
+                        <div className="viewer-sheet__header">
+                            <div>
+                                <h2>{viewerCitation.document_title}</h2>
+                                <p>Page {viewerCitation.page_number || 1}</p>
+                            </div>
+                            <button className="icon-button icon-button--ghost" type="button" onClick={() => setViewerCitation(null)} aria-label="Close citation viewer">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="viewer-sheet__body">
+                            {viewerLoading && <p className="page-caption">Loading document...</p>}
+                            {viewerError && (
+                                <div className="notice notice--error" role="alert">
+                                    <p>{viewerError}</p>
+                                </div>
+                            )}
+                            {!viewerLoading && !viewerError && viewerUrl && (
+                                <iframe
+                                    className="viewer-sheet__frame"
+                                    src={viewerCitation.mime_type === 'application/pdf'
+                                        ? `${viewerUrl}#page=${viewerCitation.page_number || 1}`
+                                        : viewerUrl}
+                                    title={`${viewerCitation.document_title} page ${viewerCitation.page_number || 1}`}
+                                />
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

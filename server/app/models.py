@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .db import Base
@@ -116,3 +116,63 @@ class SavedPack(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     marketplace_pack_id: Mapped[int] = mapped_column(ForeignKey("marketplace_packs.id", ondelete="CASCADE"))
+
+
+class SavedFile(Base):
+    __tablename__ = "saved_files"
+    __table_args__ = (
+        UniqueConstraint("user_id", "file_id", name="uq_user_saved_file_once"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Bundle(Base):
+    __tablename__ = "bundles"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "ruleset_id", "title", name="uq_owner_ruleset_bundle_title"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    ruleset_id: Mapped[int] = mapped_column(ForeignKey("rulesets.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_public: Mapped[bool]
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BundleFile(Base):
+    __tablename__ = "bundle_files"
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("bundles.id", ondelete="CASCADE"), primary_key=True)
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SavedBundle(Base):
+    __tablename__ = "saved_bundles"
+    __table_args__ = (
+        UniqueConstraint("user_id", "bundle_id", name="uq_user_saved_bundle_once"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("bundles.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class UserRulesetBundle(Base):
+    __tablename__ = "user_ruleset_bundles"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ruleset_id", name="uq_user_ruleset_bundle_once"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    ruleset_id: Mapped[int] = mapped_column(ForeignKey("rulesets.id", ondelete="CASCADE"))
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("bundles.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
