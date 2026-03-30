@@ -19,6 +19,16 @@ security = HTTPBearer(auto_error=False)
 PASSWORD_HASH_PREFIX = "bcrypt_sha256$"
 
 
+def _ensure_user_not_suspended(user: User) -> None:
+    if user.dmca_suspended_at is None:
+        return
+    raise_api_error(
+        status.HTTP_403_FORBIDDEN,
+        user.dmca_suspension_reason or "This account has been suspended under the repeat copyright infringer policy.",
+        "ACCOUNT_SUSPENDED",
+    )
+
+
 async def create_user(db, email: str, password: str, display_name: str | None = None):
     normalized_email = email.strip().lower()
     try:
@@ -67,6 +77,7 @@ async def authenticate_user(db, email: str, password: str):
         raise_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "The sign-in service is temporarily unavailable.", "AUTH_LOOKUP_FAILED")
     if not user or not verify_password(password, user.password_hash):
         return None
+    _ensure_user_not_suspended(user)
     if not user.password_hash.startswith(PASSWORD_HASH_PREFIX):
         user.password_hash = hash_password(password)
         try:
@@ -87,6 +98,14 @@ def encode_jwt(user_id: int):
 
 
 async def get_optional_user(token=Depends(security)):
+    return await _get_user_from_token(token, allow_suspended=False)
+
+
+async def get_optional_user_including_suspended(token=Depends(security)):
+    return await _get_user_from_token(token, allow_suspended=True)
+
+
+async def _get_user_from_token(token, *, allow_suspended: bool):
     if token is None or not token.credentials:
         return None
     try:
@@ -109,6 +128,8 @@ async def get_optional_user(token=Depends(security)):
             )
         if not u:
             raise_api_error(status.HTTP_401_UNAUTHORIZED, "User account not found.", "USER_NOT_FOUND")
+        if not allow_suspended:
+            _ensure_user_not_suspended(u)
         return u
 
 
@@ -119,4 +140,5 @@ async def get_current_user(user=Depends(get_optional_user)):
             "Create an account or sign in to use this feature.",
             "AUTH_REQUIRED",
         )
+    _ensure_user_not_suspended(user)
     return user

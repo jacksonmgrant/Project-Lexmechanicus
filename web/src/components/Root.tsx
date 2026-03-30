@@ -11,7 +11,7 @@ const navigation = [
 ]
 
 export function Root() {
-    const { sessionError } = useAppContext()
+    const { session, sessionError } = useAppContext()
     const location = useLocation()
     const [open, setOpen] = useState(false)
 
@@ -23,7 +23,7 @@ export function Root() {
         <div className="template-shell">
             <div className="template-mobile-header">
                 <div className="template-brand-cluster">
-                    <h1 className="template-brand-title">Lexmechanicus</h1>
+                    <h1 className="template-brand-title">Cogitator</h1>
                 </div>
                 <button className="icon-button icon-button--ghost" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
                     <Menu size={20} />
@@ -66,7 +66,7 @@ export function Root() {
             <div className="template-desktop-header">
                 <div className="template-desktop-header__inner">
                     <div className="template-brand-cluster">
-                        <h1 className="template-brand-title">Lexmechanicus</h1>
+                        <h1 className="template-brand-title">Cogitator</h1>
                     </div>
                     <nav className="template-desktop-nav">
                         {navigation.map((item) => {
@@ -93,8 +93,24 @@ export function Root() {
                         </div>
                     </div>
                 )}
+                {session?.user?.account_status === 'suspended' && (
+                    <div className="page-container">
+                        <div className="notice notice--warning" role="alert">
+                            <p>{session.user.dmca_suspension_reason || 'This account is suspended under the repeat copyright infringer policy.'}</p>
+                        </div>
+                    </div>
+                )}
                 <Outlet />
             </div>
+            <footer className="template-footer">
+                <div className="template-footer__inner">
+                    <p>Operate responsibly: only publish material you are authorized to distribute.</p>
+                    <div className="template-footer__links">
+                        <Link to="/legal/terms">Terms</Link>
+                        <Link to="/legal/copyright">Copyright Policy</Link>
+                    </div>
+                </div>
+            </footer>
         </div>
     )
 }

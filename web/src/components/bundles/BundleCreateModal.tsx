@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Search, X } from 'lucide-react'
 import { type ListedFile, type Ruleset } from '../../context/AppContext'
 import { getErrorMessage } from '../../lib/api'
@@ -11,7 +12,14 @@ type BundleCreateModalProps = {
     defaultRuleset: Ruleset | null
     onRenameFile: (fileId: number, title: string) => Promise<void> | void
     onClose: () => void
-    onSave: (input: { title: string, description: string, fileIds: number[], isPublic: boolean, rulesetId: number }) => Promise<void> | void
+    onSave: (input: {
+        title: string
+        description: string
+        fileIds: number[]
+        isPublic: boolean
+        rulesetId: number
+        publicDistributionConfirmed: boolean
+    }) => Promise<void> | void
 }
 
 const ALL_SYSTEMS_SLUG = 'all-systems'
@@ -24,6 +32,7 @@ export function BundleCreateModal({ open, availableFiles, editableFileIds, defau
     const [draftTitles, setDraftTitles] = useState<Record<number, string>>({})
     const [selectedRuleset, setSelectedRuleset] = useState<Ruleset | null>(defaultRuleset)
     const [isPublic, setIsPublic] = useState(false)
+    const [publicDistributionConfirmed, setPublicDistributionConfirmed] = useState(false)
     const [error, setError] = useState('')
     const [isSaving, setIsSaving] = useState(false)
     const editableFileIdSet = useMemo(() => new Set(editableFileIds), [editableFileIds])
@@ -37,6 +46,7 @@ export function BundleCreateModal({ open, availableFiles, editableFileIds, defau
         setDraftTitles(Object.fromEntries(availableFiles.map((file) => [file.id, file.title])))
         setSelectedRuleset(defaultRuleset)
         setIsPublic(false)
+        setPublicDistributionConfirmed(false)
         setError('')
     }, [defaultRuleset, open])
 
@@ -95,6 +105,10 @@ export function BundleCreateModal({ open, availableFiles, editableFileIds, defau
             setError('Bundles cannot be created for All Systems. Choose a specific game system.')
             return
         }
+        if (isPublic && !publicDistributionConfirmed) {
+            setError('Confirm that you have the right to distribute every file before making the bundle public.')
+            return
+        }
 
         for (const fileId of selectedFileIds) {
             if (!editableFileIdSet.has(fileId)) continue
@@ -125,6 +139,7 @@ export function BundleCreateModal({ open, availableFiles, editableFileIds, defau
                 fileIds: selectedFileIds,
                 isPublic,
                 rulesetId: selectedRuleset.id,
+                publicDistributionConfirmed,
             })
             onClose()
         } catch (err) {
@@ -198,9 +213,37 @@ export function BundleCreateModal({ open, availableFiles, editableFileIds, defau
                             className="checkbox-input"
                             type="checkbox"
                             checked={isPublic}
-                            onChange={(event) => setIsPublic(event.target.checked)}
+                            onChange={(event) => {
+                                setIsPublic(event.target.checked)
+                                if (!event.target.checked) {
+                                    setPublicDistributionConfirmed(false)
+                                }
+                            }}
                         />
                     </label>
+
+                    <div className="notice" role="note">
+                        <p>Only make a bundle public if you have the right to publish every file inside it. See the <Link className="inline-link" to="/legal/terms">Terms</Link> and <Link className="inline-link" to="/legal/copyright">Copyright Policy</Link>.</p>
+                    </div>
+
+                    {isPublic && (
+                        <div className="notice notice--error" role="alert">
+                            <p>Public bundles are discoverable by other users and are subject to DMCA takedown and repeat-infringer enforcement.</p>
+                        </div>
+                    )}
+
+                    {isPublic && (
+                        <label className="checkbox-row" htmlFor="bundle-public-confirmed">
+                            <input
+                                id="bundle-public-confirmed"
+                                className="checkbox-input"
+                                type="checkbox"
+                                checked={publicDistributionConfirmed}
+                                onChange={(event) => setPublicDistributionConfirmed(event.target.checked)}
+                            />
+                            <span>I have the legal right to distribute every file in this public bundle.</span>
+                        </label>
+                    )}
 
                     <div className="search-field search-field--compact">
                         <Search className="search-field__icon" size={18} />

@@ -1,10 +1,24 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Search, Star } from 'lucide-react'
 import { useAppContext, type Bundle, type ListedFile } from '../../context/AppContext'
 import { getErrorMessage } from '../../lib/api'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
 
 type BrowseView = 'files' | 'bundles'
+
+const browseDateFormatter = new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+})
+
+function formatUploadedDate(createdAt?: string | null) {
+    if (!createdAt) return ''
+    const parsed = new Date(createdAt)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return browseDateFormatter.format(parsed)
+}
 
 export function BrowsePage() {
     const {
@@ -26,6 +40,7 @@ export function BrowsePage() {
     const [filteredRules, setFilteredRules] = useState<ListedFile[]>([])
     const [filteredBundles, setFilteredBundles] = useState<Bundle[]>([])
     const [error, setError] = useState('')
+    const [successMessage, setSuccessMessage] = useState('')
     const [savingKey, setSavingKey] = useState('')
     const [activatingBundleId, setActivatingBundleId] = useState<number | null>(null)
 
@@ -69,6 +84,7 @@ export function BrowsePage() {
                     : file
             )))
             setError('')
+            setSuccessMessage('')
         } catch (err) {
             setError(getErrorMessage(err, rule.is_saved ? 'Unable to remove saved file.' : 'Unable to save file.'))
         } finally {
@@ -90,6 +106,7 @@ export function BrowsePage() {
                     : item
             )))
             setError('')
+            setSuccessMessage('')
         } catch (err) {
             setError(getErrorMessage(err, bundle.is_saved ? 'Unable to remove saved bundle.' : 'Unable to save bundle.'))
         } finally {
@@ -104,6 +121,7 @@ export function BrowsePage() {
             await setActiveBundle(activeGameSystem.id, bundle.id)
             setFilteredBundles((current) => current.map((item) => ({ ...item, is_default: item.id === bundle.id })))
             setError('')
+            setSuccessMessage('')
         } catch (err) {
             setError(getErrorMessage(err, 'Unable to use that bundle for chat.'))
         } finally {
@@ -144,55 +162,72 @@ export function BrowsePage() {
                 </div>
 
                 <div className="page-section-stack">
-                    {view === 'files' && filteredRules.map((rule) => (
-                        <article key={rule.id} className="surface-card browse-card">
-                            <div className="browse-card__main">
-                                <h3>{rule.title}</h3>
-                                <p className="browse-card__description">
-                                    {rule.description || rule.filename}
-                                </p>
-                                <div className="tag-list">
-                                    {rule.game_system && (
-                                        <span className="tag-badge tag-badge--game-system">{rule.game_system.name}</span>
-                                    )}
-                                    {rule.tags.map((tag) => (
-                                        <span key={tag.id} className="tag-badge">{tag.name}</span>
-                                    ))}
-                                    <span className="tag-badge">{rule.is_public ? 'Public' : 'Private'}</span>
-                                    <span className="tag-badge">{rule.status}</span>
-                                </div>
-                                <div className="meta-row">
-                                    <span>By {rule.uploader_name}</span>
-                                    <span className="meta-dot">•</span>
-                                    <span>{(rule.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
-                                </div>
-                            </div>
-                            <div className="browse-card__side">
-                                <div className="browse-card__actions">
-                                    {session?.authenticated && (
-                                        <button
-                                            type="button"
-                                            className={`icon-button icon-button--ghost${rule.is_saved ? ' icon-button--selected' : ''}`}
-                                            onClick={() => void toggleSavedFile(rule)}
-                                            disabled={savingKey === `file:${rule.id}`}
-                                            aria-label={rule.is_saved ? `Remove ${rule.title} from saved files` : `Save ${rule.title}`}
-                                            title={rule.is_saved ? 'Saved' : 'Save file'}
+                    {view === 'files' && filteredRules.map((rule) => {
+                        const uploadedDate = formatUploadedDate(rule.created_at)
+                        return (
+                            <article key={rule.id} className="surface-card browse-card">
+                                <div className="browse-card__main">
+                                    <h3>{rule.title}</h3>
+                                    <p className="browse-card__description">
+                                        {rule.description || rule.filename}
+                                    </p>
+                                    <div className="tag-list">
+                                        {rule.game_system && (
+                                            <span className="tag-badge tag-badge--game-system">{rule.game_system.name}</span>
+                                        )}
+                                        {rule.tags.map((tag) => (
+                                            <span key={tag.id} className="tag-badge">{tag.name}</span>
+                                        ))}
+                                        <span className="tag-badge">{rule.is_public ? 'Public' : 'Private'}</span>
+                                        <span className="tag-badge">{rule.status}</span>
+                                    </div>
+                                    <div className="meta-row">
+                                        <span>By {rule.uploader_name}</span>
+                                        <span className="meta-dot">•</span>
+                                        <span>{(rule.size_bytes / (1024 * 1024)).toFixed(1)} MB</span>
+                                        {uploadedDate && (
+                                            <>
+                                                <span className="meta-dot">•</span>
+                                                <span>Uploaded {uploadedDate}</span>
+                                            </>
+                                        )}
+                                    </div>
+                                    {rule.is_public && (
+                                        <Link
+                                            className="browse-card__takedown-link"
+                                            to={`/legal/copyright?file_id=${rule.id}&mode=notice`}
                                         >
-                                            <Star size={16} fill={rule.is_saved ? 'currentColor' : 'none'} />
-                                        </button>
+                                            Request Takedown
+                                        </Link>
                                     )}
-                                    <div className="stat-row">
-                                        <div className="stat-item">
-                                            <span>{rule.save_count} save{rule.save_count === 1 ? '' : 's'}</span>
+                                </div>
+                                <div className="browse-card__side">
+                                    <div className="browse-card__actions">
+                                        {session?.authenticated && (
+                                            <button
+                                                type="button"
+                                                className={`icon-button icon-button--ghost${rule.is_saved ? ' icon-button--selected' : ''}`}
+                                                onClick={() => void toggleSavedFile(rule)}
+                                                disabled={savingKey === `file:${rule.id}`}
+                                                aria-label={rule.is_saved ? `Remove ${rule.title} from saved files` : `Save ${rule.title}`}
+                                                title={rule.is_saved ? 'Saved' : 'Save file'}
+                                            >
+                                                <Star size={16} fill={rule.is_saved ? 'currentColor' : 'none'} />
+                                            </button>
+                                        )}
+                                        <div className="stat-row">
+                                            <div className="stat-item">
+                                                <span>{rule.save_count} save{rule.save_count === 1 ? '' : 's'}</span>
+                                            </div>
                                         </div>
                                     </div>
+                                    <a className="primary-button primary-button--inline" href={`${apiBase}/viewer/${rule.id}`} target="_blank" rel="noreferrer">
+                                        View File
+                                    </a>
                                 </div>
-                                <a className="primary-button primary-button--inline" href={`${apiBase}/viewer/${rule.id}`} target="_blank" rel="noreferrer">
-                                    View File
-                                </a>
-                            </div>
-                        </article>
-                    ))}
+                            </article>
+                        )
+                    })}
 
                     {view === 'bundles' && filteredBundles.map((bundle) => (
                         <article key={bundle.id} className="surface-card browse-card">
@@ -254,9 +289,15 @@ export function BrowsePage() {
                     ))}
                 </div>
 
-                {error && (
+                {!!error && (
                     <div className="notice notice--error" role="alert">
                         <p>{error}</p>
+                    </div>
+                )}
+
+                {!!successMessage && (
+                    <div className="notice notice--success" role="status">
+                        <p>{successMessage}</p>
                     </div>
                 )}
 

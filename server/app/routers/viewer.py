@@ -61,7 +61,8 @@ async def range_proxy(file_id: int, request: Request, user=Depends(get_optional_
             raise_api_error(404, "File not found.", "FILE_NOT_FOUND")
 
         file_model, owner_id = record
-        if not file_model.is_public and owner_id != (user.id if user else None):
+        is_publicly_accessible = file_model.is_public and not file_model.is_copyright_restricted
+        if not is_publicly_accessible and owner_id != (user.id if user else None):
             if user is None:
                 raise_api_error(401, "Create an account or sign in to view this private file.", "AUTH_REQUIRED")
             raise_api_error(403, "You do not have permission to view this file.", "FILE_VIEW_FORBIDDEN")

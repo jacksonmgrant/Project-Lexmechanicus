@@ -6,6 +6,8 @@ import { BrowsePage } from './components/pages/BrowsePage'
 import { ManagePage } from './components/pages/ManagePage'
 import { BundleEditorPage } from './components/pages/BundleEditorPage'
 import { AccountPage } from './components/pages/AccountPage'
+import { LegalTermsPage } from './components/pages/LegalTermsPage'
+import { CopyrightPolicyPage } from './components/pages/CopyrightPolicyPage'
 
 export const router = createBrowserRouter([
     {
@@ -18,6 +20,8 @@ export const router = createBrowserRouter([
             { path: 'manage', element: <ManagePage /> },
             { path: 'manage/bundles/:bundleId', element: <BundleEditorPage /> },
             { path: 'account', element: <AccountPage /> },
+            { path: 'legal/terms', element: <LegalTermsPage /> },
+            { path: 'legal/copyright', element: <CopyrightPolicyPage /> },
         ],
     },
 ])

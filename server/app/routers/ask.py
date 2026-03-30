@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi import HTTPException
+from pydantic import BaseModel, Field, validator
 from sqlalchemy.exc import SQLAlchemyError
 from sse_starlette.sse import EventSourceResponse
 from ..auth import get_optional_user
@@ -12,6 +13,7 @@ from ..errors import error_detail, raise_api_error
 from ..rate_limiter import RateLimiter
 from ..services.bundles import load_accessible_bundle
 from ..services.citations import build_chat_citations
+from ..services.chat_context import build_contextual_question, sanitize_chat_history
 from ..services.retrieval import estimate_retrieval_quality, hybrid_retrieve
 from ..services.rulesets import get_ruleset_scope_ids
 from ..services.model_router import choose_model
@@ -38,15 +40,45 @@ SYSTEM_PROMPT = (
 )
 
 
-@router.get("/stream")
-async def ask_stream(
+class ChatHistoryTurn(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=1000)
+
+    @validator("role")
+    def validate_role(cls, value: str):
+        return value.strip().lower()
+
+    @validator("content")
+    def validate_content(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Message content cannot be blank.")
+        return normalized
+
+
+class AskStreamRequest(BaseModel):
+    q: str = Field(min_length=1, max_length=500)
+    ruleset_id: int = Field(ge=1)
+    bundle_id: int | None = Field(default=None, ge=1)
+    history: list[ChatHistoryTurn] = Field(default_factory=list, max_items=8)
+
+    @validator("q")
+    def validate_question(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter a question before sending.")
+        return normalized
+
+
+async def _ask_stream_impl(
     request: Request,
-    q: str = Query(..., min_length=1, max_length=500),
-    ruleset_id: int = Query(..., ge=1),
-    bundle_id: int | None = Query(None, ge=1),
-    user=Depends(get_optional_user),
+    *,
+    question: str,
+    ruleset_id: int,
+    bundle_id: int | None,
+    history: list[dict] | None,
+    user,
 ):
-    question = q.strip()
     if not question:
         raise_api_error(422, "Enter a question before sending.", "QUESTION_REQUIRED")
 
@@ -57,6 +89,9 @@ async def ask_stream(
     reservation = None
     if user is None:
         reservation = await guest_usage.reserve(guest_key, question)
+
+    sanitized_history = sanitize_chat_history(history)
+    retrieval_query = build_contextual_question(question, sanitized_history)
 
     try:
         async with SessionLocal() as db:
@@ -79,7 +114,7 @@ async def ask_stream(
             user.id if user else None,
             ruleset_ids=scoped_ruleset_ids,
             include_all=False,
-            query=question,
+            query=retrieval_query,
             k=8,
             bundle_id=selected_bundle.id if selected_bundle else None,
         )
@@ -111,7 +146,13 @@ async def ask_stream(
         if citations:
             yield {"event": "citations", "data": json.dumps({"citations": citations})}
         try:
-            async for delta in stream_completion(model, SYSTEM_PROMPT, question, chunks):
+            async for delta in stream_completion(
+                model,
+                SYSTEM_PROMPT,
+                question,
+                chunks,
+                conversation_history=sanitized_history,
+            ):
                 streamed_text += delta
                 yield {"event": "token", "data": delta}
         except HTTPException as exc:
@@ -131,3 +172,37 @@ async def ask_stream(
 
 
     return EventSourceResponse(event_gen())
+
+
+@router.get("/stream")
+async def ask_stream(
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=500),
+    ruleset_id: int = Query(..., ge=1),
+    bundle_id: int | None = Query(None, ge=1),
+    user=Depends(get_optional_user),
+):
+    return await _ask_stream_impl(
+        request,
+        question=q.strip(),
+        ruleset_id=ruleset_id,
+        bundle_id=bundle_id,
+        history=[],
+        user=user,
+    )
+
+
+@router.post("/stream")
+async def ask_stream_post(
+    request: Request,
+    body: AskStreamRequest,
+    user=Depends(get_optional_user),
+):
+    return await _ask_stream_impl(
+        request,
+        question=body.q,
+        ruleset_id=body.ruleset_id,
+        bundle_id=body.bundle_id,
+        history=[item.dict() for item in body.history],
+        user=user,
+    )

@@ -29,7 +29,7 @@ AND EXISTS (
         f.id = fc.file_id
         AND f.ruleset_id = :ruleset_id
         AND (
-            f.is_public = TRUE
+            (f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
             OR (:user_id IS NOT NULL AND fo.user_id = :user_id)
         )
 )

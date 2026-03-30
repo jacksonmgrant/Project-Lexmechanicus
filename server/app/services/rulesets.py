@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import File as FileModel
@@ -45,13 +45,27 @@ def _saved_pack_folder_exists(user_id: int):
     )
 
 
-def build_file_access_condition(*, user_id: int | None, include_public_for_authenticated: bool = True):
-    if user_id is None:
-        return FileModel.is_public.is_(True)
+def build_public_file_access_clause():
+    return and_(
+        FileModel.is_public.is_(True),
+        FileModel.is_copyright_restricted.is_(False),
+    )
 
-    access_clauses = [Folder.user_id == user_id, _saved_pack_folder_exists(user_id)]
+
+def build_file_access_condition(*, user_id: int | None, include_public_for_authenticated: bool = True):
+    public_clause = build_public_file_access_clause()
+    if user_id is None:
+        return public_clause
+
+    access_clauses = [
+        Folder.user_id == user_id,
+        and_(
+            _saved_pack_folder_exists(user_id),
+            FileModel.is_copyright_restricted.is_(False),
+        ),
+    ]
     if include_public_for_authenticated:
-        access_clauses.insert(0, FileModel.is_public.is_(True))
+        access_clauses.insert(0, public_clause)
     return or_(*access_clauses)
 
 
@@ -186,7 +200,7 @@ async def get_ruleset_scope_ids(db: AsyncSession, *, ruleset_id: int | None) -> 
 async def list_user_rulesets(db: AsyncSession, *, user_id: int | None) -> list[Ruleset]:
     accessible_ruleset_ids = select(FileModel.ruleset_id).join(Folder, Folder.id == FileModel.folder_id).where(FileModel.ruleset_id.is_not(None))
     if user_id is None:
-        accessible_ruleset_ids = accessible_ruleset_ids.where(FileModel.is_public.is_(True)).distinct()
+        accessible_ruleset_ids = accessible_ruleset_ids.where(build_public_file_access_clause()).distinct()
     else:
         # Keep the authenticated dropdown aligned with browse access so public
         # rules stay visible even for users who have not uploaded anything yet.

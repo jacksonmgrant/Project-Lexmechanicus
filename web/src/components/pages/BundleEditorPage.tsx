@@ -52,6 +52,7 @@ export function BundleEditorPage() {
     const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([])
     const [uploadDescription, setUploadDescription] = useState('')
     const [uploadIsPublic, setUploadIsPublic] = useState(false)
+    const [publicDistributionConfirmed, setPublicDistributionConfirmed] = useState(false)
     const [isLoading, setIsLoading] = useState(true)
     const [isAddingFiles, setIsAddingFiles] = useState(false)
     const [removingFileId, setRemovingFileId] = useState<number | null>(null)
@@ -329,6 +330,10 @@ export function BundleEditorPage() {
             setError('Keep the upload description under 1000 characters.')
             return
         }
+        if ((bundleDetail.bundle.is_public || uploadIsPublic) && !publicDistributionConfirmed) {
+            setError('Confirm that you have the right to distribute the uploaded files before making them public.')
+            return
+        }
 
         setIsUploading(true)
         const uploadedFileIds: number[] = []
@@ -344,6 +349,7 @@ export function BundleEditorPage() {
                     uploadDescription.trim(),
                     bundleDetail.bundle.game_system_id,
                     [],
+                    publicDistributionConfirmed,
                 )
                 uploadedFileIds.push(result.file_id)
                 setPendingUploads((current) => current.map((item) => item.id === file.id ? { ...item, status: 'complete' } : item))
@@ -360,6 +366,7 @@ export function BundleEditorPage() {
                 setPendingUploads((current) => current.filter((file) => file.status !== 'complete'))
                 setUploadDescription('')
                 setUploadIsPublic(false)
+                setPublicDistributionConfirmed(false)
             }
 
             if (failures.length) {
@@ -599,9 +606,37 @@ export function BundleEditorPage() {
                                         className="checkbox-input"
                                         checked={bundleDetail.bundle.is_public || uploadIsPublic}
                                         disabled={bundleDetail.bundle.is_public}
-                                        onChange={(event) => setUploadIsPublic(event.target.checked)}
+                                        onChange={(event) => {
+                                            setUploadIsPublic(event.target.checked)
+                                            if (!event.target.checked) {
+                                                setPublicDistributionConfirmed(false)
+                                            }
+                                        }}
                                     />
                                 </label>
+
+                                <div className="notice" role="note">
+                                    <p>Only make uploaded files public if you have the right to distribute them. See the <Link className="inline-link" to="/legal/terms">Terms</Link> and <Link className="inline-link" to="/legal/copyright">Copyright Policy</Link>.</p>
+                                </div>
+
+                                {(bundleDetail.bundle.is_public || uploadIsPublic) && (
+                                    <div className="notice notice--error" role="alert">
+                                        <p>Public bundle uploads are discoverable by other users and are subject to DMCA takedown and repeat-infringer enforcement.</p>
+                                    </div>
+                                )}
+
+                                {(bundleDetail.bundle.is_public || uploadIsPublic) && (
+                                    <label className="checkbox-row" htmlFor="bundle-upload-public-confirmed">
+                                        <input
+                                            id="bundle-upload-public-confirmed"
+                                            type="checkbox"
+                                            className="checkbox-input"
+                                            checked={publicDistributionConfirmed}
+                                            onChange={(event) => setPublicDistributionConfirmed(event.target.checked)}
+                                        />
+                                        <span>I have the legal right to distribute every public file in this upload.</span>
+                                    </label>
+                                )}
 
                                 <div className="button-row">
                                     <button

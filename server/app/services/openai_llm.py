@@ -19,6 +19,7 @@ def _build_agent_instructions(system: str) -> str:
         "Prefer a decisive paraphrase over hedging when the evidence is clear. "
         "If the evidence supports only part of the answer, state the supported part and identify the missing condition. "
         "If multiple excerpts matter, synthesize the controlling rule and its exception together instead of discussing them separately. "
+        "Use the recent conversation only to resolve what the current question is referring to; do not drift into answering earlier questions unless the current question asks for that. "
         "When quoting matters, use only short exact quotes taken from the provided 'Key quote' or 'Supporting quote' lines. Never invent, merge, or clean up a quote beyond whitespace normalization. "
         "If a limitation or exception changes the ruling, mention it immediately after the ruling instead of saving it for the end. "
         "Avoid preambles like 'Based on the excerpts' or references to JSON, retrieval, or internal context. "
@@ -61,13 +62,35 @@ def _append_chunk_lines(lines: list[str], index: int, chunk: dict) -> None:
     lines.append("")
 
 
-def _build_context_brief(user: str, context_chunks: list[dict], *, max_chars: int = 16000) -> str:
+def _append_conversation_lines(lines: list[str], conversation_history: list[dict]) -> None:
+    if not conversation_history:
+        return
+
+    lines.append("Recent conversation:")
+    for turn in conversation_history[-6:]:
+        role = _clean_text(turn.get("role") or "").lower()
+        content = _trim_context_excerpt(str(turn.get("content") or ""), max_chars=260)
+        if role not in {"user", "assistant"} or not content:
+            continue
+        prefix = "User" if role == "user" else "Assistant"
+        lines.append(f"{prefix}: {content}")
+    lines.append("")
+
+
+def _build_context_brief(
+    user: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] | None = None,
+    *,
+    max_chars: int = 16000,
+) -> str:
     lines = [
         "User question:",
         _clean_text(user),
         "",
-        "Primary evidence (highest-confidence rule matches):",
     ]
+    _append_conversation_lines(lines, conversation_history or [])
+    lines.append("Primary evidence (highest-confidence rule matches):")
 
     if not context_chunks:
         lines.append("No supporting excerpts were retrieved.")
@@ -102,25 +125,37 @@ def _build_context_brief(user: str, context_chunks: list[dict], *, max_chars: in
     return brief[:max_chars]
 
 
-def _build_input_items(user: str, context_chunks: list[dict]) -> list[dict]:
+def _build_input_items(
+    user: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] | None = None,
+) -> list[dict]:
     return [
         {
             "role": "user",
             "content": [
                 {
                     "type": "input_text",
-                    "text": _build_context_brief(user, context_chunks),
+                    "text": _build_context_brief(user, context_chunks, conversation_history),
                 },
             ],
         }
     ]
 
 
-def _build_payload(model: str, system: str, user: str, context_chunks: list[dict], *, max_output_tokens: int) -> dict[str, object]:
+def _build_payload(
+    model: str,
+    system: str,
+    user: str,
+    context_chunks: list[dict],
+    conversation_history: list[dict] | None = None,
+    *,
+    max_output_tokens: int,
+) -> dict[str, object]:
     return {
         "model": model,
         "instructions": _build_agent_instructions(system),
-        "input": _build_input_items(user, context_chunks),
+        "input": _build_input_items(user, context_chunks, conversation_history),
         "stream": True,
         "max_output_tokens": max_output_tokens,
         "reasoning": {"effort": "minimal"},
@@ -128,7 +163,14 @@ def _build_payload(model: str, system: str, user: str, context_chunks: list[dict
     }
 
 
-async def stream_completion(model: str, system: str, user: str, context_chunks: list[dict]):
+async def stream_completion(
+    model: str,
+    system: str,
+    user: str,
+    context_chunks: list[dict],
+    *,
+    conversation_history: list[dict] | None = None,
+):
     api_key = settings.OPENAI_API_KEY
     if not api_key:
         raise_api_error(503, "AI responses are not configured right now.", "AI_NOT_CONFIGURED")
@@ -151,6 +193,7 @@ async def stream_completion(model: str, system: str, user: str, context_chunks: 
                     system,
                     user,
                     context_chunks,
+                    conversation_history,
                     max_output_tokens=max_output_tokens,
                 )
                 async with client.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=payload) as r:

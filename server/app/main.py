@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 
 from .db import DATABASE_URL
 from .errors import http_exception_handler, request_validation_exception_handler, unhandled_exception_handler
-from .routers import ask, auth, search, uploads, viewer
+from .routers import ask, auth, legal, search, uploads, viewer
 
 
 def _run_startup_migrations():
@@ -32,13 +32,14 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Lexmechanicus", lifespan=lifespan)
+app = FastAPI(title="Cogitator", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 app.include_router(auth.router)
 app.include_router(ask.router)
+app.include_router(legal.router)
 app.include_router(search.router)
 app.include_router(uploads.router)
 app.include_router(viewer.router)

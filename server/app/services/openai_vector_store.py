@@ -64,6 +64,24 @@ async def attach_file_to_vector_store(
     }
 
 
+async def delete_vector_store_file(*, vector_store_id: str, vector_store_file_id: str) -> None:
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.delete(
+            f"https://api.openai.com/v1/vector_stores/{vector_store_id}/files/{vector_store_file_id}",
+            headers=_auth_headers(beta=True),
+        )
+        response.raise_for_status()
+
+
+async def delete_openai_file(*, openai_file_id: str) -> None:
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.delete(
+            f"https://api.openai.com/v1/files/{openai_file_id}",
+            headers=_auth_headers(),
+        )
+        response.raise_for_status()
+
+
 async def sync_file_to_vector_store(
     *,
     filename: str,
@@ -83,3 +101,18 @@ async def sync_file_to_vector_store(
         "openai_vector_store_file_id": vector_store_file["vector_store_file_id"],
         "openai_vector_store_status": vector_store_file["status"],
     }
+
+
+async def purge_file_from_vector_store(
+    *,
+    vector_store_id: str | None,
+    openai_file_id: str | None,
+    vector_store_file_id: str | None,
+) -> None:
+    if vector_store_id and vector_store_file_id:
+        await delete_vector_store_file(
+            vector_store_id=vector_store_id,
+            vector_store_file_id=vector_store_file_id,
+        )
+    if openai_file_id:
+        await delete_openai_file(openai_file_id=openai_file_id)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, UTC
+import hmac
 import json
 import logging
 import os
@@ -8,7 +10,7 @@ from pathlib import Path
 import aioboto3
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, UploadFile
 from pydantic import BaseModel, Field, validator
 from sqlalchemy import Text, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -17,7 +19,7 @@ from ..auth import get_current_user, get_optional_user
 from ..config import _env_bool, settings
 from ..db import SessionLocal
 from ..errors import raise_api_error
-from ..models import Bundle, BundleFile, SavedBundle, UserRulesetBundle
+from ..models import Bundle, BundleFile, CopyrightTakedownRequest, SavedBundle, UserRulesetBundle
 from ..models import File as FileModel
 from ..models import FileChunk, FileTag, Folder, GameSystem, Ruleset, RulesetAlias, SavedFile, Tag, User
 from ..services.bundles import (
@@ -29,13 +31,29 @@ from ..services.bundles import (
     serialize_bundle,
 )
 from ..services.chunker import iter_chunks
+from ..services.dmca import (
+    ACTIVE_DMCA_STATUSES,
+    TAKEDOWN_STATUS_COUNTER_RECEIVED,
+    TAKEDOWN_STATUS_DISABLED,
+    TAKEDOWN_STATUS_LAWSUIT_HOLD,
+    TAKEDOWN_STATUS_PENDING,
+    TAKEDOWN_STATUS_REJECTED,
+    TAKEDOWN_STATUS_RESTORED,
+    add_business_days,
+)
+from ..services.email import EmailDeliveryError, send_plain_email
 from ..services.embeddings import embed_texts
-from ..services.openai_vector_store import OpenAIVectorStoreSyncError, sync_file_to_vector_store
+from ..services.openai_vector_store import (
+    OpenAIVectorStoreSyncError,
+    purge_file_from_vector_store,
+    sync_file_to_vector_store,
+)
 from ..services.parsers import extract_document_title, normalize_text, should_replace_with_extracted_title
 from ..services.rulesets import (
     DEFAULT_RULESET_NAME,
     DEFAULT_RULESET_SLUG,
     build_file_access_condition,
+    build_public_file_access_clause,
     create_ruleset,
     get_active_ruleset,
     get_ruleset_scope_ids,
@@ -131,6 +149,7 @@ class BundleCreateRequest(BaseModel):
     ruleset_id: int = Field(ge=1)
     file_ids: list[int] = Field(default_factory=list)
     is_public: bool = False
+    public_distribution_confirmed: bool = False
 
     @validator("title")
     def validate_title(cls, value: str):
@@ -190,6 +209,169 @@ class BundleTitleUpdateRequest(BaseModel):
         if not normalized:
             raise ValueError("Enter a bundle title.")
         return normalized
+
+
+class CopyrightTakedownCreateRequest(BaseModel):
+    claimant_name: str = Field(min_length=1, max_length=120)
+    claimant_email: str = Field(min_length=3, max_length=255)
+    claimant_phone: str = Field(min_length=7, max_length=40)
+    claimant_address: str = Field(min_length=5, max_length=1000)
+    copyright_owner_name: str = Field(default="", max_length=160)
+    work_description: str = Field(min_length=5, max_length=2000)
+    material_location: str = Field(default="", max_length=1000)
+    infringement_explanation: str = Field(default="", max_length=4000)
+    signature: str = Field(min_length=1, max_length=255)
+    good_faith_statement_confirmed: bool = Field(default=False)
+    accuracy_statement_confirmed: bool = Field(default=False)
+    authority_statement_confirmed: bool = Field(default=False)
+
+    @validator("claimant_name")
+    def validate_claimant_name(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter your name.")
+        return normalized
+
+    @validator("claimant_email")
+    def validate_claimant_email(cls, value: str):
+        normalized = value.strip().lower()
+        if not normalized or "@" not in normalized:
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+    @validator("claimant_phone")
+    def validate_claimant_phone(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if len(normalized) < 7:
+            raise ValueError("Enter a valid phone number.")
+        return normalized
+
+    @validator("claimant_address")
+    def validate_claimant_address(cls, value: str):
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("Enter a mailing address.")
+        return normalized
+
+    @validator("copyright_owner_name")
+    def validate_copyright_owner_name(cls, value: str):
+        return " ".join(value.strip().split())
+
+    @validator("work_description", "material_location", "infringement_explanation", pre=True, always=True)
+    def validate_text_fields(cls, value: str):
+        return (value or "").strip()
+
+    @validator("signature")
+    def validate_signature(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter your electronic signature.")
+        return normalized
+
+    @validator("infringement_explanation")
+    def validate_long_text(cls, value: str):
+        return value.strip()
+
+    @validator("good_faith_statement_confirmed")
+    def validate_good_faith_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm the good-faith belief statement.")
+        return value
+
+    @validator("accuracy_statement_confirmed")
+    def validate_accuracy_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm the accuracy and perjury statement.")
+        return value
+
+    @validator("authority_statement_confirmed")
+    def validate_authority_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm that you are the copyright owner or authorized to act for them.")
+        return value
+
+
+class CopyrightCounterNoticeCreateRequest(BaseModel):
+    claimant_name: str = Field(min_length=1, max_length=120)
+    claimant_email: str = Field(min_length=3, max_length=255)
+    claimant_phone: str = Field(min_length=7, max_length=40)
+    claimant_address: str = Field(min_length=5, max_length=1000)
+    counter_explanation: str = Field(default="", max_length=4000)
+    signature: str = Field(min_length=1, max_length=255)
+    mistake_statement_confirmed: bool = Field(default=False)
+    perjury_statement_confirmed: bool = Field(default=False)
+    jurisdiction_statement_confirmed: bool = Field(default=False)
+
+    @validator("claimant_name")
+    def validate_claimant_name(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter your name.")
+        return normalized
+
+    @validator("claimant_email")
+    def validate_claimant_email(cls, value: str):
+        normalized = value.strip().lower()
+        if not normalized or "@" not in normalized:
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+    @validator("claimant_phone")
+    def validate_claimant_phone(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if len(normalized) < 7:
+            raise ValueError("Enter a valid phone number.")
+        return normalized
+
+    @validator("claimant_address")
+    def validate_claimant_address(cls, value: str):
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("Enter a mailing address.")
+        return normalized
+
+    @validator("counter_explanation", pre=True, always=True)
+    def validate_counter_explanation(cls, value: str):
+        return (value or "").strip()
+
+    @validator("signature")
+    def validate_signature(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        if not normalized:
+            raise ValueError("Enter your electronic signature.")
+        return normalized
+
+    @validator("mistake_statement_confirmed")
+    def validate_mistake_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm the mistake or misidentification statement.")
+        return value
+
+    @validator("perjury_statement_confirmed")
+    def validate_perjury_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm the penalty-of-perjury statement.")
+        return value
+
+    @validator("jurisdiction_statement_confirmed")
+    def validate_jurisdiction_statement_confirmed(cls, value: bool):
+        if not value:
+            raise ValueError("You must confirm the jurisdiction and service-of-process statement.")
+        return value
+
+
+class CopyrightTakedownReviewRequest(BaseModel):
+    reviewed_by: str = Field(default="admin", max_length=255)
+    review_notes: str = Field(default="", max_length=2000)
+
+    @validator("reviewed_by")
+    def validate_reviewed_by(cls, value: str):
+        normalized = " ".join(value.strip().split())
+        return normalized or "admin"
+
+    @validator("review_notes")
+    def validate_review_notes(cls, value: str):
+        return value.strip()
 
 
 def _ensure_storage_configured() -> None:
@@ -391,6 +573,262 @@ async def _resolve_ruleset(db, *, requested_ruleset_id: int | None, user_id: int
     return active_ruleset
 
 
+def _require_admin_review_token(x_admin_token: str | None) -> None:
+    expected = settings.ADMIN_REVIEW_TOKEN
+    if not expected:
+        raise_api_error(503, "Admin review is not configured right now.", "ADMIN_REVIEW_NOT_CONFIGURED")
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, expected):
+        raise_api_error(403, "You do not have permission to review takedown requests.", "ADMIN_REVIEW_FORBIDDEN")
+
+
+def _serialize_takedown_row(
+    takedown: CopyrightTakedownRequest,
+    *,
+    file_model: FileModel,
+    owner: User,
+    bundle_count_changed: int = 0,
+) -> dict[str, object]:
+    return {
+        "id": takedown.id,
+        "status": takedown.status,
+        "claimant_name": takedown.claimant_name,
+        "claimant_email": takedown.claimant_email,
+        "claimant_phone": takedown.claimant_phone,
+        "claimant_address": takedown.claimant_address,
+        "copyright_owner_name": takedown.copyright_owner_name,
+        "work_description": takedown.work_description,
+        "material_location": takedown.material_location,
+        "infringement_explanation": takedown.infringement_explanation,
+        "claimant_signature": takedown.claimant_signature,
+        "good_faith_statement_confirmed": takedown.good_faith_statement_confirmed,
+        "accuracy_statement_confirmed": takedown.accuracy_statement_confirmed,
+        "authority_statement_confirmed": takedown.authority_statement_confirmed,
+        "created_at": takedown.created_at.isoformat() if takedown.created_at else None,
+        "disabled_at": takedown.disabled_at.isoformat() if takedown.disabled_at else None,
+        "reviewed_at": takedown.reviewed_at.isoformat() if takedown.reviewed_at else None,
+        "reviewed_by": takedown.reviewed_by,
+        "review_notes": takedown.review_notes,
+        "uploader_notified_at": takedown.uploader_notified_at.isoformat() if takedown.uploader_notified_at else None,
+        "strike_applied_at": takedown.strike_applied_at.isoformat() if takedown.strike_applied_at else None,
+        "counter_claimant_name": takedown.counter_claimant_name,
+        "counter_claimant_email": takedown.counter_claimant_email,
+        "counter_claimant_phone": takedown.counter_claimant_phone,
+        "counter_claimant_address": takedown.counter_claimant_address,
+        "counter_explanation": takedown.counter_explanation,
+        "counter_signature": takedown.counter_signature,
+        "counter_mistake_statement_confirmed": takedown.counter_mistake_statement_confirmed,
+        "counter_perjury_statement_confirmed": takedown.counter_perjury_statement_confirmed,
+        "counter_jurisdiction_statement_confirmed": takedown.counter_jurisdiction_statement_confirmed,
+        "counter_submitted_at": takedown.counter_submitted_at.isoformat() if takedown.counter_submitted_at else None,
+        "counter_reviewed_at": takedown.counter_reviewed_at.isoformat() if takedown.counter_reviewed_at else None,
+        "counter_reviewed_by": takedown.counter_reviewed_by,
+        "counter_review_notes": takedown.counter_review_notes,
+        "claimant_notified_of_counter_at": takedown.claimant_notified_of_counter_at.isoformat() if takedown.claimant_notified_of_counter_at else None,
+        "restore_after_at": takedown.restore_after_at.isoformat() if takedown.restore_after_at else None,
+        "restore_deadline_at": takedown.restore_deadline_at.isoformat() if takedown.restore_deadline_at else None,
+        "restored_at": takedown.restored_at.isoformat() if takedown.restored_at else None,
+        "lawsuit_notice_received_at": takedown.lawsuit_notice_received_at.isoformat() if takedown.lawsuit_notice_received_at else None,
+        "bundle_count_changed": bundle_count_changed,
+        "file": {
+            "id": file_model.id,
+            "title": file_model.title,
+            "filename": file_model.filename,
+            "is_public": file_model.is_public,
+            "is_copyright_restricted": file_model.is_copyright_restricted,
+            "uploader_name": owner.display_name or "Anonymous",
+            "uploader_email": owner.email,
+        },
+    }
+
+
+def _public_app_base_url(request: Request) -> str:
+    return settings.PUBLIC_APP_URL.rstrip("/") or str(request.base_url).rstrip("/")
+
+
+def _build_viewer_url(request: Request, file_id: int) -> str:
+    return f"{_public_app_base_url(request)}/viewer/{file_id}"
+
+
+def _default_material_location(*, request: Request, file_model: FileModel) -> str:
+    return f'{_build_viewer_url(request, file_model.id)} ({file_model.title} / {file_model.filename})'
+
+
+def _require_public_distribution_confirmation(*, is_public: bool, confirmed: bool) -> None:
+    if is_public and not confirmed:
+        raise_api_error(
+            422,
+            "Confirm that you have the right to distribute this material before making it public.",
+            "PUBLIC_DISTRIBUTION_CONFIRMATION_REQUIRED",
+        )
+
+
+async def _purge_openai_copy(
+    *,
+    openai_file_id: str | None,
+    openai_vector_store_file_id: str | None,
+) -> None:
+    if not openai_file_id and not openai_vector_store_file_id:
+        return
+    await purge_file_from_vector_store(
+        vector_store_id=settings.OPENAI_VECTOR_STORE_ID,
+        openai_file_id=openai_file_id,
+        vector_store_file_id=openai_vector_store_file_id,
+    )
+
+
+def _build_takedown_email_body(
+    *,
+    request: Request,
+    takedown: CopyrightTakedownRequest,
+    file_model: FileModel,
+    owner: User,
+) -> str:
+    app_base = _public_app_base_url(request)
+    viewer_url = _build_viewer_url(request, file_model.id)
+    approve_url = f"{app_base}/uploads/takedowns/{takedown.id}/approve"
+    reject_url = f"{app_base}/uploads/takedowns/{takedown.id}/reject"
+    return "\n".join(
+        [
+            "A new DMCA takedown notice was submitted.",
+            "",
+            f"Request ID: {takedown.id}",
+            f"Status: {takedown.status}",
+            f"Submitted at: {takedown.created_at.isoformat() if takedown.created_at else datetime.now(UTC).isoformat()}",
+            "",
+            "Claimant",
+            f"Name: {takedown.claimant_name}",
+            f"Email: {takedown.claimant_email}",
+            f"Phone: {takedown.claimant_phone or ''}",
+            f"Address: {takedown.claimant_address or ''}",
+            f"Copyright owner: {takedown.copyright_owner_name or takedown.claimant_name}",
+            f"Electronic signature: {takedown.claimant_signature or takedown.claimant_name}",
+            "",
+            "Copyrighted work identified by claimant",
+            takedown.work_description,
+            "",
+            "Reported material",
+            f"File ID: {file_model.id}",
+            f"Title: {file_model.title}",
+            f"Filename: {file_model.filename}",
+            f"Uploader: {owner.display_name or 'Anonymous'} <{owner.email}>",
+            f"Viewer URL: {viewer_url}",
+            f"Claimant location reference: {takedown.material_location or viewer_url}",
+            "",
+            "Claimant explanation",
+            takedown.infringement_explanation or "(No additional explanation provided.)",
+            "",
+            "Required statements",
+            f"Good-faith statement confirmed: {takedown.good_faith_statement_confirmed}",
+            f"Accuracy/perjury statement confirmed: {takedown.accuracy_statement_confirmed}",
+            f"Authority statement confirmed: {takedown.authority_statement_confirmed}",
+            "",
+            "Admin actions",
+            f"Approve and disable access with POST {approve_url}",
+            f"Reject with POST {reject_url}",
+            "",
+            "Include your configured X-Admin-Token header when reviewing.",
+        ]
+    )
+
+
+def _build_uploader_takedown_email_body(
+    *,
+    request: Request,
+    takedown: CopyrightTakedownRequest,
+    file_model: FileModel,
+) -> str:
+    return "\n".join(
+        [
+            "Access to your uploaded file has been disabled in response to a DMCA takedown notice.",
+            "",
+            f"File: {file_model.title} ({file_model.filename})",
+            f"File URL: {_build_viewer_url(request, file_model.id)}",
+            f"Notice ID: {takedown.id}",
+            f"Disabled at: {takedown.disabled_at.isoformat() if takedown.disabled_at else datetime.now(UTC).isoformat()}",
+            "",
+            "Claimant",
+            f"Name: {takedown.claimant_name}",
+            f"Email: {takedown.claimant_email}",
+            f"Phone: {takedown.claimant_phone or ''}",
+            f"Address: {takedown.claimant_address or ''}",
+            f"Claimed owner: {takedown.copyright_owner_name or takedown.claimant_name}",
+            "",
+            "Claimed copyrighted work",
+            takedown.work_description,
+            "",
+            "Claimed infringing material location",
+            takedown.material_location or _default_material_location(request=request, file_model=file_model),
+            "",
+            "Claimant explanation",
+            takedown.infringement_explanation or "(No additional explanation provided.)",
+            "",
+            "If you believe the file was removed by mistake or misidentification, you may submit a counter-notice from the account that uploaded the file.",
+        ]
+    )
+
+
+def _build_counter_notice_email_body(
+    *,
+    request: Request,
+    takedown: CopyrightTakedownRequest,
+    file_model: FileModel,
+    owner: User,
+) -> str:
+    app_base = _public_app_base_url(request)
+    restore_after = takedown.restore_after_at.isoformat() if takedown.restore_after_at else ""
+    restore_deadline = takedown.restore_deadline_at.isoformat() if takedown.restore_deadline_at else ""
+    record_lawsuit_url = f"{app_base}/uploads/takedowns/{takedown.id}/lawsuit-hold"
+    restore_url = f"{app_base}/uploads/takedowns/{takedown.id}/restore"
+    return "\n".join(
+        [
+            "A DMCA counter-notice has been accepted for previously disabled material.",
+            "",
+            f"Notice ID: {takedown.id}",
+            f"File: {file_model.title} ({file_model.filename})",
+            f"Uploader: {owner.display_name or 'Anonymous'} <{owner.email}>",
+            f"File URL: {_build_viewer_url(request, file_model.id)}",
+            "",
+            "Counter-notice claimant",
+            f"Name: {takedown.counter_claimant_name}",
+            f"Email: {takedown.counter_claimant_email}",
+            f"Phone: {takedown.counter_claimant_phone or ''}",
+            f"Address: {takedown.counter_claimant_address or ''}",
+            f"Electronic signature: {takedown.counter_signature or takedown.counter_claimant_name}",
+            "",
+            "Counter-notice explanation",
+            takedown.counter_explanation or "(No additional explanation provided.)",
+            "",
+            "Required counter-notice statements",
+            f"Mistake or misidentification statement confirmed: {takedown.counter_mistake_statement_confirmed}",
+            f"Penalty-of-perjury statement confirmed: {takedown.counter_perjury_statement_confirmed}",
+            f"Jurisdiction statement confirmed: {takedown.counter_jurisdiction_statement_confirmed}",
+            "",
+            f"Restoration window opens: {restore_after}",
+            f"Restoration deadline: {restore_deadline}",
+            "",
+            "If you file an action seeking a court order, notify the service provider before restoration and record that with:",
+            record_lawsuit_url,
+            "",
+            "Absent lawsuit notice, the service provider may restore access after the restoration window opens:",
+            restore_url,
+        ]
+    )
+
+
+def _build_account_suspension_email_body(*, user: User) -> str:
+    return "\n".join(
+        [
+            "Your Cogitator account has been suspended under the repeat copyright infringer policy.",
+            "",
+            f"Account: {user.email}",
+            f"Approved DMCA notices counted: {int(user.dmca_strike_count or 0)}",
+            f"Suspended at: {user.dmca_suspended_at.isoformat() if user.dmca_suspended_at else datetime.now(UTC).isoformat()}",
+            "",
+            user.dmca_suspension_reason or "This account exceeded the configured repeat infringer threshold.",
+        ]
+    )
+
+
 async def _serialize_file_metadata(db, file_ids: list[int]) -> tuple[dict[int, dict[str, object] | None], dict[int, list[dict[str, object]]]]:
     if not file_ids:
         return {}, {}
@@ -443,7 +881,7 @@ async def _load_owned_file(db, *, file_id: int, user_id: int) -> FileModel:
     return file_model
 
 
-async def _load_accessible_file(db, *, file_id: int, user_id: int) -> FileModel:
+async def _load_accessible_file(db, *, file_id: int, user_id: int | None) -> FileModel:
     file_model = await db.scalar(
         select(FileModel)
         .join(Folder, Folder.id == FileModel.folder_id)
@@ -521,7 +959,9 @@ async def _serialize_bundle_detail_payload(db, *, bundle: Bundle, user_id: int) 
                 FileModel.filename,
                 FileModel.mime_type,
                 FileModel.size_bytes,
+                FileModel.created_at,
                 FileModel.is_public,
+                FileModel.is_copyright_restricted,
                 FileModel.openai_vector_store_status,
                 FileModel.ruleset_id,
                 Folder.id.label("folder_id"),
@@ -623,7 +1063,9 @@ def _serialize_file_listing_row(
         "filename": row["filename"],
         "mime_type": row["mime_type"],
         "size_bytes": row["size_bytes"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "is_public": row["is_public"],
+        "is_copyright_restricted": row["is_copyright_restricted"] or False,
         "is_saved": row["id"] in saved_file_ids,
         "status": row["openai_vector_store_status"] or "ready",
         "folder_id": row["folder_id"],
@@ -633,6 +1075,74 @@ def _serialize_file_listing_row(
         "uploader_name": row["uploader_display_name"] or "Anonymous",
         "chunk_count": row["chunk_count"] or 0,
         "save_count": row["save_count"] or 0,
+    }
+
+
+async def _load_latest_takedown_for_file(db, *, file_id: int) -> CopyrightTakedownRequest | None:
+    return await db.scalar(
+        select(CopyrightTakedownRequest)
+        .where(CopyrightTakedownRequest.file_id == file_id)
+        .order_by(CopyrightTakedownRequest.created_at.desc(), CopyrightTakedownRequest.id.desc())
+        .limit(1)
+    )
+
+
+async def _apply_repeat_infringer_policy(
+    db,
+    *,
+    owner: User,
+    takedown: CopyrightTakedownRequest,
+    reviewed_by: str,
+) -> bool:
+    existing_strike = await db.scalar(
+        select(CopyrightTakedownRequest.id)
+        .where(
+            CopyrightTakedownRequest.file_id == takedown.file_id,
+            CopyrightTakedownRequest.id != takedown.id,
+            CopyrightTakedownRequest.strike_applied_at.is_not(None),
+        )
+        .limit(1)
+    )
+    if existing_strike is not None:
+        return False
+
+    strike_applied_at = datetime.now(UTC)
+    takedown.strike_applied_at = strike_applied_at
+    owner.dmca_strike_count = int(owner.dmca_strike_count or 0) + 1
+
+    if (
+        owner.dmca_suspended_at is None
+        and int(owner.dmca_strike_count or 0) >= max(1, settings.DMCA_REPEAT_INFRINGER_THRESHOLD)
+    ):
+        owner.dmca_suspended_at = strike_applied_at
+        owner.dmca_suspension_reason = (
+            f"Suspended after {int(owner.dmca_strike_count or 0)} approved DMCA notices "
+            f"under the repeat copyright infringer policy. Reviewed by {reviewed_by or 'admin'}."
+        )
+        return True
+
+    return False
+
+
+async def _serialize_copyright_status(
+    db,
+    *,
+    request: Request,
+    file_model: FileModel,
+    owner: User,
+) -> dict[str, object]:
+    latest_takedown = await _load_latest_takedown_for_file(db, file_id=file_model.id)
+    return {
+        "file": {
+            "id": file_model.id,
+            "title": file_model.title,
+            "filename": file_model.filename,
+            "is_public": file_model.is_public,
+            "is_copyright_restricted": file_model.is_copyright_restricted,
+            "uploader_name": owner.display_name or "Anonymous",
+            "viewer_url": _build_viewer_url(request, file_model.id),
+        },
+        "latest_notice": _serialize_takedown_row(latest_takedown, file_model=file_model, owner=owner) if latest_takedown else None,
     }
 
 
@@ -754,6 +1264,650 @@ async def update_active_game_system(body: ActiveGameSystemUpdateRequest, user=De
     }
 
 
+@router.get("/{file_id}/copyright-status")
+async def get_copyright_status(file_id: int, request: Request, user=Depends(get_optional_user)):
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(FileModel, User)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(
+                    FileModel.id == file_id,
+                    build_file_access_condition(user_id=user.id if user else None),
+                )
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "File not found.", "FILE_NOT_FOUND")
+            file_model, owner = record
+            payload = await _serialize_copyright_status(
+                db,
+                request=request,
+                file_model=file_model,
+                owner=owner,
+            )
+        except SQLAlchemyError:
+            logger.exception("Copyright status lookup failed", extra={"file_id": file_id, "user_id": user.id if user else None})
+            raise_api_error(503, "Copyright status could not be loaded right now.", "COPYRIGHT_STATUS_LOOKUP_FAILED")
+    return payload
+
+
+@router.post("/{file_id}/copyright-takedown")
+async def request_copyright_takedown(
+    file_id: int,
+    body: CopyrightTakedownCreateRequest,
+    request: Request,
+    user=Depends(get_optional_user),
+):
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(FileModel, User)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(
+                    FileModel.id == file_id,
+                    build_public_file_access_clause(),
+                )
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "That public file is not available for a DMCA notice.", "FILE_NOT_FOUND")
+
+            file_model, owner = record
+            latest_takedown = await _load_latest_takedown_for_file(db, file_id=file_model.id)
+            if latest_takedown is not None and latest_takedown.status == TAKEDOWN_STATUS_PENDING:
+                raise_api_error(409, "A DMCA notice is already pending for this file.", "TAKEDOWN_ALREADY_PENDING")
+            if latest_takedown is not None and latest_takedown.status in ACTIVE_DMCA_STATUSES:
+                raise_api_error(409, "This file has already been disabled pending copyright review.", "TAKEDOWN_ALREADY_ACTIVE")
+
+            takedown = CopyrightTakedownRequest(
+                file_id=file_model.id,
+                status=TAKEDOWN_STATUS_PENDING,
+                claimant_name=body.claimant_name,
+                claimant_email=body.claimant_email,
+                claimant_phone=body.claimant_phone,
+                claimant_address=body.claimant_address,
+                copyright_owner_name=body.copyright_owner_name or None,
+                work_description=body.work_description,
+                material_location=body.material_location or _default_material_location(request=request, file_model=file_model),
+                infringement_explanation=body.infringement_explanation or "",
+                claimant_signature=body.signature,
+                good_faith_statement_confirmed=body.good_faith_statement_confirmed,
+                accuracy_statement_confirmed=body.accuracy_statement_confirmed,
+                authority_statement_confirmed=body.authority_statement_confirmed,
+            )
+            db.add(takedown)
+            await db.commit()
+            await db.refresh(takedown)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Copyright takedown request failed", extra={"file_id": file_id, "user_id": user.id if user else None})
+            raise_api_error(503, "The DMCA notice could not be submitted right now.", "TAKEDOWN_REQUEST_FAILED")
+
+    admin_notified = False
+    try:
+        await send_plain_email(
+            recipients=settings.ADMIN_TAKEDOWN_EMAILS,
+            subject=f"[Cogitator] DMCA notice #{takedown.id} for file #{file_model.id}",
+            body=_build_takedown_email_body(
+                request=request,
+                takedown=takedown,
+                file_model=file_model,
+                owner=owner,
+            ),
+        )
+        admin_notified = True
+    except EmailDeliveryError:
+        logger.warning("Takedown notice recorded without admin email delivery", extra={"request_id": takedown.id, "file_id": file_model.id})
+    except Exception:
+        logger.exception("Unexpected DMCA notice email failure", extra={"request_id": takedown.id, "file_id": file_model.id})
+
+    return {
+        "status": "queued",
+        "request_id": takedown.id,
+        "admin_notified": admin_notified,
+    }
+
+
+@router.post("/{file_id}/copyright-counter-notice")
+async def submit_copyright_counter_notice(
+    file_id: int,
+    body: CopyrightCounterNoticeCreateRequest,
+    request: Request,
+    user=Depends(get_current_user),
+):
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(FileModel, User)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(FileModel.id == file_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "File not found.", "FILE_NOT_FOUND")
+
+            file_model, owner = record
+            if owner.id != user.id:
+                raise_api_error(403, "Only the uploader can submit a counter-notice for this file.", "COUNTER_NOTICE_FORBIDDEN")
+
+            takedown = await _load_latest_takedown_for_file(db, file_id=file_model.id)
+            if takedown is None or takedown.status not in {TAKEDOWN_STATUS_DISABLED, TAKEDOWN_STATUS_LAWSUIT_HOLD}:
+                raise_api_error(409, "This file is not currently in a state that allows a counter-notice.", "COUNTER_NOTICE_NOT_ALLOWED")
+            if takedown.status == TAKEDOWN_STATUS_LAWSUIT_HOLD:
+                raise_api_error(409, "A lawsuit notice has already been recorded for this claim.", "COUNTER_NOTICE_LAWSUIT_HOLD")
+            if takedown.counter_submitted_at is not None:
+                raise_api_error(409, "A counter-notice has already been submitted for this claim.", "COUNTER_NOTICE_ALREADY_SUBMITTED")
+
+            takedown.counter_claimant_name = body.claimant_name
+            takedown.counter_claimant_email = body.claimant_email
+            takedown.counter_claimant_phone = body.claimant_phone
+            takedown.counter_claimant_address = body.claimant_address
+            takedown.counter_explanation = body.counter_explanation or ""
+            takedown.counter_signature = body.signature
+            takedown.counter_mistake_statement_confirmed = body.mistake_statement_confirmed
+            takedown.counter_perjury_statement_confirmed = body.perjury_statement_confirmed
+            takedown.counter_jurisdiction_statement_confirmed = body.jurisdiction_statement_confirmed
+            takedown.counter_submitted_at = datetime.now(UTC)
+            takedown.counter_reviewed_at = None
+            takedown.counter_reviewed_by = None
+            takedown.counter_review_notes = None
+            takedown.claimant_notified_of_counter_at = None
+            takedown.restore_after_at = None
+            takedown.restore_deadline_at = None
+            await db.commit()
+            await db.refresh(takedown)
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Counter-notice submission failed", extra={"file_id": file_id, "user_id": user.id})
+            raise_api_error(503, "The counter-notice could not be submitted right now.", "COUNTER_NOTICE_SUBMIT_FAILED")
+
+    admin_notified = False
+    try:
+        await send_plain_email(
+            recipients=settings.ADMIN_TAKEDOWN_EMAILS,
+            subject=f"[Cogitator] Counter-notice submitted for DMCA notice #{takedown.id}",
+            body="\n".join(
+                [
+                    "A DMCA counter-notice has been submitted and is awaiting review.",
+                    "",
+                    f"Notice ID: {takedown.id}",
+                    f"File: {file_model.title} ({file_model.filename})",
+                    f"Uploader: {owner.display_name or 'Anonymous'} <{owner.email}>",
+                    f"File URL: {_build_viewer_url(request, file_model.id)}",
+                    "",
+                    f"Name: {takedown.counter_claimant_name}",
+                    f"Email: {takedown.counter_claimant_email}",
+                    f"Phone: {takedown.counter_claimant_phone or ''}",
+                    f"Address: {takedown.counter_claimant_address or ''}",
+                    f"Signature: {takedown.counter_signature or takedown.counter_claimant_name}",
+                    "",
+                    "Counter-notice explanation",
+                    takedown.counter_explanation or "(No additional explanation provided.)",
+                    "",
+                    "Review with a POST request to:",
+                    f"{_public_app_base_url(request)}/uploads/takedowns/{takedown.id}/accept-counter",
+                ]
+            ),
+        )
+        admin_notified = True
+    except EmailDeliveryError:
+        logger.warning("Counter-notice recorded without admin email delivery", extra={"request_id": takedown.id, "file_id": file_model.id})
+    except Exception:
+        logger.exception("Unexpected counter-notice email failure", extra={"request_id": takedown.id, "file_id": file_model.id})
+
+    return {
+        "status": "queued",
+        "request_id": takedown.id,
+        "admin_notified": admin_notified,
+    }
+
+
+@router.get("/takedowns")
+async def list_copyright_takedowns(
+    status: str = Query(
+        TAKEDOWN_STATUS_PENDING,
+        pattern="^(pending|disabled|rejected|counter_received|restored|lawsuit_hold)$",
+    ),
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+
+    async with SessionLocal() as db:
+        try:
+            rows = (
+                await db.execute(
+                    select(CopyrightTakedownRequest, FileModel, User)
+                    .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                    .join(Folder, Folder.id == FileModel.folder_id)
+                    .join(User, User.id == Folder.user_id)
+                    .where(CopyrightTakedownRequest.status == status)
+                    .order_by(CopyrightTakedownRequest.created_at.desc(), CopyrightTakedownRequest.id.desc())
+                )
+            ).all()
+        except SQLAlchemyError:
+            logger.exception("Takedown list failed", extra={"status": status})
+            raise_api_error(503, "Takedown requests could not be loaded right now.", "TAKEDOWN_LIST_FAILED")
+
+    return [
+        _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+        for takedown, file_model, owner in rows
+    ]
+
+
+@router.post("/takedowns/{takedown_id}/approve")
+async def approve_copyright_takedown(
+    takedown_id: int,
+    request: Request,
+    body: CopyrightTakedownReviewRequest | None = None,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+    review = body or CopyrightTakedownReviewRequest()
+
+    uploader_notified = False
+    suspension_notified = False
+    should_suspend_owner = False
+    openai_cleanup_required = False
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+
+            takedown, file_model, owner = record
+            if takedown.status != TAKEDOWN_STATUS_PENDING:
+                raise_api_error(409, "Only pending DMCA notices can be approved.", "TAKEDOWN_NOT_PENDING")
+
+            approved_at = datetime.now(UTC)
+            affected_public_bundle_ids = list(
+                (
+                    await db.execute(
+                        select(Bundle.id)
+                        .join(BundleFile, BundleFile.bundle_id == Bundle.id)
+                        .where(
+                            BundleFile.file_id == file_model.id,
+                            Bundle.is_public.is_(True),
+                        )
+                    )
+                ).scalars().all()
+            )
+
+            takedown.status = TAKEDOWN_STATUS_DISABLED
+            takedown.disabled_at = approved_at
+            takedown.reviewed_at = approved_at
+            takedown.reviewed_by = review.reviewed_by
+            takedown.review_notes = review.review_notes or None
+            file_model.is_public = False
+            file_model.is_copyright_restricted = True
+            file_model.copyright_restricted_at = approved_at
+            openai_cleanup_required = bool(file_model.openai_file_id or file_model.openai_vector_store_file_id)
+
+            if affected_public_bundle_ids:
+                await db.execute(
+                    update(Bundle)
+                    .where(Bundle.id.in_(affected_public_bundle_ids))
+                    .values({"is_public": False})
+                )
+
+            should_suspend_owner = await _apply_repeat_infringer_policy(
+                db,
+                owner=owner,
+                takedown=takedown,
+                reviewed_by=review.reviewed_by,
+            )
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Takedown approval failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The takedown request could not be approved right now.", "TAKEDOWN_APPROVE_FAILED")
+
+    if openai_cleanup_required:
+        try:
+            await _purge_openai_copy(
+                openai_file_id=file_model.openai_file_id,
+                openai_vector_store_file_id=file_model.openai_vector_store_file_id,
+            )
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(FileModel)
+                    .where(FileModel.id == file_model.id)
+                    .values(
+                        {
+                            "openai_file_id": None,
+                            "openai_vector_store_file_id": None,
+                            "openai_vector_store_status": "removed",
+                            "openai_last_error": None,
+                        }
+                    )
+                )
+                await db.commit()
+        except (OpenAIVectorStoreSyncError, httpx.HTTPError) as exc:
+            logger.warning("OpenAI copy cleanup failed after takedown approval", extra={"file_id": file_model.id, "takedown_id": takedown_id, "error": str(exc)})
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(FileModel)
+                    .where(FileModel.id == file_model.id)
+                    .values({"openai_vector_store_status": "deletion_failed", "openai_last_error": str(exc)[:2000]})
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.exception("Unexpected OpenAI cleanup failure after takedown approval", extra={"file_id": file_model.id, "takedown_id": takedown_id})
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(FileModel)
+                    .where(FileModel.id == file_model.id)
+                    .values({"openai_vector_store_status": "deletion_failed", "openai_last_error": str(exc)[:2000]})
+                )
+                await db.commit()
+
+    try:
+        await send_plain_email(
+            recipients=[owner.email],
+            subject=f"[Cogitator] File disabled after DMCA notice #{takedown.id}",
+            body=_build_uploader_takedown_email_body(
+                request=request,
+                takedown=takedown,
+                file_model=file_model,
+            ),
+        )
+        uploader_notified = True
+        async with SessionLocal() as db:
+            await db.execute(
+                update(CopyrightTakedownRequest)
+                .where(CopyrightTakedownRequest.id == takedown.id)
+                .values({"uploader_notified_at": datetime.now(UTC)})
+            )
+            await db.commit()
+        takedown.uploader_notified_at = datetime.now(UTC)
+    except EmailDeliveryError:
+        logger.warning("Uploader DMCA notice email was not delivered", extra={"takedown_id": takedown.id, "file_id": file_model.id})
+    except Exception:
+        logger.exception("Unexpected uploader DMCA email failure", extra={"takedown_id": takedown.id, "file_id": file_model.id})
+
+    if should_suspend_owner and owner.dmca_suspended_at is not None:
+        try:
+            await send_plain_email(
+                recipients=[owner.email],
+                subject="[Cogitator] Account suspended under repeat infringer policy",
+                body=_build_account_suspension_email_body(user=owner),
+            )
+            suspension_notified = True
+        except EmailDeliveryError:
+            logger.warning("Suspension email was not delivered", extra={"user_id": owner.id})
+        except Exception:
+            logger.exception("Unexpected suspension email failure", extra={"user_id": owner.id})
+
+    payload = _serialize_takedown_row(
+        takedown,
+        file_model=file_model,
+        owner=owner,
+        bundle_count_changed=len(set(affected_public_bundle_ids)),
+    )
+    payload["uploader_notified"] = uploader_notified
+    payload["suspension_notified"] = suspension_notified
+    return payload
+
+
+@router.post("/takedowns/{takedown_id}/reject")
+async def reject_copyright_takedown(
+    takedown_id: int,
+    body: CopyrightTakedownReviewRequest | None = None,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+    review = body or CopyrightTakedownReviewRequest()
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+            takedown, file_model, owner = record
+            if takedown.status != TAKEDOWN_STATUS_PENDING:
+                raise_api_error(409, "Only pending DMCA notices can be rejected.", "TAKEDOWN_NOT_PENDING")
+
+            takedown.status = TAKEDOWN_STATUS_REJECTED
+            takedown.reviewed_at = datetime.now(UTC)
+            takedown.reviewed_by = review.reviewed_by
+            takedown.review_notes = review.review_notes or None
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Takedown rejection failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The takedown request could not be rejected right now.", "TAKEDOWN_REJECT_FAILED")
+
+    return _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+
+
+@router.post("/takedowns/{takedown_id}/accept-counter")
+async def accept_copyright_counter_notice(
+    takedown_id: int,
+    request: Request,
+    body: CopyrightTakedownReviewRequest | None = None,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+    review = body or CopyrightTakedownReviewRequest()
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+            takedown, file_model, owner = record
+            if takedown.status != TAKEDOWN_STATUS_DISABLED:
+                raise_api_error(409, "Only disabled claims can accept a counter-notice.", "COUNTER_NOTICE_REVIEW_NOT_ALLOWED")
+            if takedown.counter_submitted_at is None:
+                raise_api_error(409, "No counter-notice has been submitted for this claim.", "COUNTER_NOTICE_MISSING")
+
+            reviewed_at = datetime.now(UTC)
+            restore_after_at = add_business_days(
+                reviewed_at,
+                max(1, settings.DMCA_COUNTER_RESTORE_AFTER_BUSINESS_DAYS),
+            )
+            restore_deadline_at = add_business_days(
+                reviewed_at,
+                max(
+                    settings.DMCA_COUNTER_RESTORE_AFTER_BUSINESS_DAYS,
+                    settings.DMCA_COUNTER_RESTORE_DEADLINE_BUSINESS_DAYS,
+                ),
+            )
+
+            takedown.status = TAKEDOWN_STATUS_COUNTER_RECEIVED
+            takedown.counter_reviewed_at = reviewed_at
+            takedown.counter_reviewed_by = review.reviewed_by
+            takedown.counter_review_notes = review.review_notes or None
+            takedown.claimant_notified_of_counter_at = reviewed_at
+            takedown.restore_after_at = restore_after_at
+            takedown.restore_deadline_at = restore_deadline_at
+
+            await send_plain_email(
+                recipients=[takedown.claimant_email],
+                subject=f"[Cogitator] Counter-notice forwarded for DMCA notice #{takedown.id}",
+                body=_build_counter_notice_email_body(
+                    request=request,
+                    takedown=takedown,
+                    file_model=file_model,
+                    owner=owner,
+                ),
+            )
+            await db.commit()
+        except EmailDeliveryError:
+            await db.rollback()
+            raise_api_error(503, "The claimant could not be notified of the counter-notice right now.", "COUNTER_NOTICE_FORWARD_FAILED")
+        except Exception:
+            await db.rollback()
+            logger.exception("Unexpected counter-notice forward failure", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The claimant could not be notified of the counter-notice right now.", "COUNTER_NOTICE_FORWARD_FAILED")
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Counter-notice acceptance failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The counter-notice could not be accepted right now.", "COUNTER_NOTICE_ACCEPT_FAILED")
+
+    return _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+
+
+@router.post("/takedowns/{takedown_id}/reject-counter")
+async def reject_copyright_counter_notice(
+    takedown_id: int,
+    body: CopyrightTakedownReviewRequest | None = None,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+    review = body or CopyrightTakedownReviewRequest()
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+            takedown, file_model, owner = record
+            if takedown.status != TAKEDOWN_STATUS_DISABLED or takedown.counter_submitted_at is None:
+                raise_api_error(409, "There is no pending counter-notice to reject.", "COUNTER_NOTICE_NOT_PENDING")
+
+            takedown.counter_reviewed_at = datetime.now(UTC)
+            takedown.counter_reviewed_by = review.reviewed_by
+            takedown.counter_review_notes = review.review_notes or None
+            takedown.counter_claimant_name = None
+            takedown.counter_claimant_email = None
+            takedown.counter_claimant_phone = None
+            takedown.counter_claimant_address = None
+            takedown.counter_explanation = None
+            takedown.counter_signature = None
+            takedown.counter_mistake_statement_confirmed = False
+            takedown.counter_perjury_statement_confirmed = False
+            takedown.counter_jurisdiction_statement_confirmed = False
+            takedown.counter_submitted_at = None
+            takedown.claimant_notified_of_counter_at = None
+            takedown.restore_after_at = None
+            takedown.restore_deadline_at = None
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Counter-notice rejection failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The counter-notice could not be rejected right now.", "COUNTER_NOTICE_REJECT_FAILED")
+
+    return _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+
+
+@router.post("/takedowns/{takedown_id}/lawsuit-hold")
+async def record_copyright_lawsuit_hold(
+    takedown_id: int,
+    body: CopyrightTakedownReviewRequest | None = None,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+    review = body or CopyrightTakedownReviewRequest()
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+            takedown, file_model, owner = record
+            if takedown.status not in {TAKEDOWN_STATUS_DISABLED, TAKEDOWN_STATUS_COUNTER_RECEIVED}:
+                raise_api_error(409, "A lawsuit hold can only be recorded after disablement or counter-notice.", "LAWSUIT_HOLD_NOT_ALLOWED")
+
+            takedown.status = TAKEDOWN_STATUS_LAWSUIT_HOLD
+            takedown.lawsuit_notice_received_at = datetime.now(UTC)
+            takedown.counter_reviewed_at = takedown.counter_reviewed_at or takedown.lawsuit_notice_received_at
+            takedown.counter_reviewed_by = review.reviewed_by
+            takedown.counter_review_notes = review.review_notes or takedown.counter_review_notes
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("Lawsuit hold failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The lawsuit hold could not be recorded right now.", "LAWSUIT_HOLD_FAILED")
+
+    return _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+
+
+@router.post("/takedowns/{takedown_id}/restore")
+async def restore_copyright_claimed_file(
+    takedown_id: int,
+    x_admin_token: str | None = Header(None),
+):
+    _require_admin_review_token(x_admin_token)
+
+    async with SessionLocal() as db:
+        try:
+            row = await db.execute(
+                select(CopyrightTakedownRequest, FileModel, User)
+                .join(FileModel, FileModel.id == CopyrightTakedownRequest.file_id)
+                .join(Folder, Folder.id == FileModel.folder_id)
+                .join(User, User.id == Folder.user_id)
+                .where(CopyrightTakedownRequest.id == takedown_id)
+            )
+            record = row.first()
+            if record is None:
+                raise_api_error(404, "Takedown request not found.", "TAKEDOWN_NOT_FOUND")
+            takedown, file_model, owner = record
+            if takedown.status != TAKEDOWN_STATUS_COUNTER_RECEIVED:
+                raise_api_error(409, "Only claims with an accepted counter-notice can be restored.", "RESTORE_NOT_ALLOWED")
+            if takedown.lawsuit_notice_received_at is not None:
+                raise_api_error(409, "A lawsuit notice has been recorded for this claim.", "RESTORE_LAWSUIT_HOLD")
+            if takedown.restore_after_at is not None and datetime.now(UTC) < takedown.restore_after_at:
+                raise_api_error(
+                    409,
+                    f"Restoration cannot occur before {takedown.restore_after_at.isoformat()}.",
+                    "RESTORE_TOO_EARLY",
+                )
+
+            restored_at = datetime.now(UTC)
+            takedown.status = TAKEDOWN_STATUS_RESTORED
+            takedown.restored_at = restored_at
+            file_model.is_public = True
+            file_model.is_copyright_restricted = False
+            file_model.copyright_restricted_at = None
+            await db.commit()
+        except SQLAlchemyError:
+            await db.rollback()
+            logger.exception("File restoration failed", extra={"takedown_id": takedown_id})
+            raise_api_error(503, "The file could not be restored right now.", "RESTORE_FAILED")
+
+    return _serialize_takedown_row(takedown, file_model=file_model, owner=owner)
+
+
 @router.get("/bundles")
 async def list_bundles(
     scope: str = Query("browse", pattern="^(browse|mine|saved)$"),
@@ -857,6 +2011,10 @@ async def list_bundles(
 
 @router.post("/bundles")
 async def create_bundle(body: BundleCreateRequest, user=Depends(get_current_user)):
+    _require_public_distribution_confirmation(
+        is_public=body.is_public,
+        confirmed=body.public_distribution_confirmed,
+    )
     async with SessionLocal() as db:
         try:
             selected_ruleset = await _resolve_ruleset(db, requested_ruleset_id=body.ruleset_id, user_id=user.id)
@@ -1170,6 +2328,7 @@ async def delete_bundle(bundle_id: int, user=Depends(get_current_user)):
 async def upload_file(
     folder_id: int = Form(...),
     is_public: bool = Form(False),
+    public_distribution_confirmed: bool = Form(False),
     title: str = Form(...),
     description: str = Form(""),
     tag_ids: str = Form("[]"),
@@ -1181,6 +2340,10 @@ async def upload_file(
     normalized_title = title.strip()
     normalized_description = description.strip()
     parsed_tag_ids = _parse_tag_ids(tag_ids)
+    _require_public_distribution_confirmation(
+        is_public=bool(is_public),
+        confirmed=bool(public_distribution_confirmed),
+    )
     if not normalized_title:
         raise_api_error(422, "Enter a title before uploading.", "TITLE_REQUIRED")
     if len(normalized_title) > 120:
@@ -1213,6 +2376,8 @@ async def upload_file(
     file_id: int | None = None
     key: str | None = None
     openai_sync_status = None
+    synced_openai_file_id: str | None = None
+    synced_openai_vector_store_file_id: str | None = None
 
     async with SessionLocal() as db:
         try:
@@ -1259,11 +2424,13 @@ async def upload_file(
                             "folder_id": resolved_folder_id,
                             "user_id": user.id,
                             "filename": normalized_filename,
-                            "source": "lexmechanicus_upload",
+                            "source": "cogitator_upload",
                             "ruleset_id": selected_ruleset.id,
                         },
                     )
                     openai_sync_status = sync_result["openai_vector_store_status"] or "in_progress"
+                    synced_openai_file_id = sync_result["openai_file_id"]
+                    synced_openai_vector_store_file_id = sync_result["openai_vector_store_file_id"]
                     await db.execute(
                         update(FileModel)
                         .where(FileModel.id == file_id)
@@ -1307,6 +2474,14 @@ async def upload_file(
                     await _delete_file_from_storage(key)
                 except Exception:
                     logger.warning("Failed to clean up stored file after integrity error", extra={"key": key})
+            if synced_openai_file_id or synced_openai_vector_store_file_id:
+                try:
+                    await _purge_openai_copy(
+                        openai_file_id=synced_openai_file_id,
+                        openai_vector_store_file_id=synced_openai_vector_store_file_id,
+                    )
+                except Exception:
+                    logger.warning("Failed to clean up OpenAI copy after integrity error", extra={"file_id": file_id})
             raise_api_error(400, "Upload metadata is invalid. The selected folder or related records are missing.", "UPLOAD_METADATA_INVALID")
         except SQLAlchemyError:
             await db.rollback()
@@ -1315,6 +2490,14 @@ async def upload_file(
                     await _delete_file_from_storage(key)
                 except Exception:
                     logger.warning("Failed to clean up stored file after database error", extra={"key": key})
+            if synced_openai_file_id or synced_openai_vector_store_file_id:
+                try:
+                    await _purge_openai_copy(
+                        openai_file_id=synced_openai_file_id,
+                        openai_vector_store_file_id=synced_openai_vector_store_file_id,
+                    )
+                except Exception:
+                    logger.warning("Failed to clean up OpenAI copy after database error", extra={"file_id": file_id})
             raise_api_error(503, "The upload could not be saved right now. Please try again.", "UPLOAD_SAVE_FAILED")
 
     return {
@@ -1354,7 +2537,9 @@ async def list_files(
                     FileModel.filename,
                     FileModel.mime_type,
                     FileModel.size_bytes,
+                    FileModel.created_at,
                     FileModel.is_public,
+                    FileModel.is_copyright_restricted,
                     FileModel.openai_vector_store_status,
                     FileModel.ruleset_id,
                     Folder.id.label("folder_id"),
@@ -1384,7 +2569,7 @@ async def list_files(
                 if user is not None:
                     stmt = stmt.where(build_file_access_condition(user_id=user.id))
                 else:
-                    stmt = stmt.where(FileModel.is_public.is_(True))
+                    stmt = stmt.where(build_public_file_access_clause())
 
             if scoped_ruleset_ids is not None:
                 stmt = stmt.where(FileModel.ruleset_id.in_(scoped_ruleset_ids))
@@ -1539,6 +2724,16 @@ async def delete_file(file_id: int, user=Depends(get_current_user)):
             file_model, owner_id = record
             if owner_id != user.id:
                 raise_api_error(403, "You do not have permission to delete this file.", "FILE_DELETE_FORBIDDEN")
+            if file_model.openai_file_id or file_model.openai_vector_store_file_id:
+                try:
+                    await _purge_openai_copy(
+                        openai_file_id=file_model.openai_file_id,
+                        openai_vector_store_file_id=file_model.openai_vector_store_file_id,
+                    )
+                except (OpenAIVectorStoreSyncError, httpx.HTTPError) as exc:
+                    raise_api_error(503, f"Third-party copy cleanup failed: {str(exc)[:240]}", "FILE_VENDOR_DELETE_FAILED")
+                except Exception as exc:
+                    raise_api_error(503, f"Third-party copy cleanup failed: {str(exc)[:240]}", "FILE_VENDOR_DELETE_FAILED")
             await _delete_file_from_storage(file_model.s3_key)
             await db.execute(delete(FileModel).where(FileModel.id == file_id))
             await _delete_empty_bundles_for_file(db, file_id=file_id)

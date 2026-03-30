@@ -1,6 +1,6 @@
-# Project Lexmechanicus
+# Project Cogitator
 
-Lexmechanicus is a FastAPI + React application for searching and querying user-uploaded rules packs. Files are uploaded to S3-compatible storage, normalized into searchable chunks, embedded for later reranking, and then surfaced through keyword search or an SSE-backed answer stream.
+Cogitator is a FastAPI + React application for searching and querying user-uploaded rules packs. Files are uploaded to S3-compatible storage, normalized into searchable chunks, embedded for later reranking, and then surfaced through keyword search or an SSE-backed answer stream.
 
 > Unofficial fan tool. Not affiliated with any game publisher. Users may only upload material they have the rights to share.
 
@@ -135,7 +135,7 @@ Create the MinIO bucket once the services are up:
 
 1. Open `http://localhost:9191`
 2. Sign in with `minioadmin` / `minioadmin`
-3. Create a bucket named `lexmechanicus`
+3. Create a bucket named `cogitator`
 
 ### 4. Set up the backend
 

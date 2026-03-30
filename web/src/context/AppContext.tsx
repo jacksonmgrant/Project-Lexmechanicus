@@ -43,6 +43,11 @@ export type ChatCitation = {
     excerpt_text?: string
 }
 
+export type ChatHistoryTurn = {
+    role: 'user' | 'assistant'
+    content: string
+}
+
 export type BundleDetail = {
     bundle: Bundle
     files: ListedFile[]
@@ -50,7 +55,16 @@ export type BundleDetail = {
 
 type SessionInfo = {
     authenticated: boolean
-    user: { id: number, email: string, display_name?: string | null, created_at: string | null } | null
+    user: {
+        id: number
+        email: string
+        display_name?: string | null
+        dmca_strike_count: number
+        account_status: 'active' | 'suspended'
+        dmca_suspended_at?: string | null
+        dmca_suspension_reason?: string | null
+        created_at: string | null
+    } | null
     active_game_system?: Ruleset | null
     available_game_systems?: Ruleset[]
     active_bundle?: Bundle | null
@@ -70,7 +84,9 @@ export type ListedFile = {
     filename: string
     mime_type: string
     size_bytes: number
+    created_at?: string | null
     is_public: boolean
+    is_copyright_restricted: boolean
     is_saved: boolean
     status: string
     folder_id: number
@@ -96,6 +112,60 @@ type CreateBundleInput = {
     rulesetId: number
     fileIds: number[]
     isPublic: boolean
+    publicDistributionConfirmed: boolean
+}
+
+type CopyrightTakedownInput = {
+    claimantName: string
+    claimantEmail: string
+    claimantPhone: string
+    claimantAddress: string
+    copyrightOwnerName?: string
+    workDescription: string
+    materialLocation?: string
+    infringementExplanation: string
+    signature: string
+    goodFaithStatementConfirmed: boolean
+    accuracyStatementConfirmed: boolean
+    authorityStatementConfirmed: boolean
+}
+
+type CopyrightCounterNoticeInput = {
+    claimantName: string
+    claimantEmail: string
+    claimantPhone: string
+    claimantAddress: string
+    counterExplanation: string
+    signature: string
+    mistakeStatementConfirmed: boolean
+    perjuryStatementConfirmed: boolean
+    jurisdictionStatementConfirmed: boolean
+}
+
+export type CopyrightNoticeSummary = {
+    id: number
+    status: string
+    created_at?: string | null
+    disabled_at?: string | null
+    review_notes?: string | null
+    counter_submitted_at?: string | null
+    restore_after_at?: string | null
+    restore_deadline_at?: string | null
+    restored_at?: string | null
+    lawsuit_notice_received_at?: string | null
+}
+
+export type CopyrightStatusPayload = {
+    file: {
+        id: number
+        title: string
+        filename: string
+        is_public: boolean
+        is_copyright_restricted: boolean
+        uploader_name: string
+        viewer_url: string
+    }
+    latest_notice: CopyrightNoticeSummary | null
 }
 
 type AppContextValue = {
@@ -117,10 +187,21 @@ type AppContextValue = {
     updateProfile: (displayName: string) => Promise<string>
     changePassword: (currentPassword: string, newPassword: string) => Promise<string>
     listFiles: (scope: FileScope, query?: string, rulesetId?: number) => Promise<ListedFile[]>
-    uploadFile: (file: File, isPublic: boolean, title: string, description?: string, rulesetId?: number | null, tagIds?: number[]) => Promise<{ file_id: number, chunks: number }>
+    uploadFile: (
+        file: File,
+        isPublic: boolean,
+        title: string,
+        description?: string,
+        rulesetId?: number | null,
+        tagIds?: number[],
+        publicDistributionConfirmed?: boolean,
+    ) => Promise<{ file_id: number, chunks: number }>
     deleteFile: (fileId: number) => Promise<void>
     saveFile: (fileId: number) => Promise<void>
     unsaveFile: (fileId: number) => Promise<void>
+    getCopyrightStatus: (fileId: number) => Promise<CopyrightStatusPayload>
+    submitCopyrightTakedown: (fileId: number, input: CopyrightTakedownInput) => Promise<{ request_id: number, admin_notified: boolean }>
+    submitCopyrightCounterNotice: (fileId: number, input: CopyrightCounterNoticeInput) => Promise<{ request_id: number, admin_notified: boolean }>
     listBundles: (scope: BundleScope, query?: string, rulesetId?: number) => Promise<Bundle[]>
     getBundle: (bundleId: number) => Promise<BundleDetail>
     createBundle: (input: CreateBundleInput) => Promise<Bundle>
@@ -131,7 +212,7 @@ type AppContextValue = {
     saveBundle: (bundleId: number) => Promise<void>
     unsaveBundle: (bundleId: number) => Promise<void>
     setActiveBundle: (rulesetId: number, bundleId: number | null) => Promise<void>
-    streamAsk: (question: string, onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => Promise<void>
+    streamAsk: (question: string, history: ChatHistoryTurn[], onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => Promise<void>
     searchTags: (query: string, limit?: number) => Promise<Tag[]>
     createTag: (name: string) => Promise<Tag>
     updateFileTags: (fileId: number, tagIds: number[]) => Promise<Tag[]>
@@ -143,6 +224,39 @@ type AppContextValue = {
 }
 
 const AppContext = React.createContext<AppContextValue | null>(null)
+
+const TOKEN_STORAGE_KEY = 'cogitator.token'
+const LEGACY_TOKEN_STORAGE_KEY = 'lexmechanicus.token'
+const GUEST_ID_STORAGE_KEY = 'cogitator.guestId'
+const LEGACY_GUEST_ID_STORAGE_KEY = 'lexmechanicus.guestId'
+
+function getStoredValueWithLegacy(storageKey: string, legacyKey: string) {
+    const currentValue = getStoredValue(storageKey)
+    if (currentValue.trim()) {
+        return currentValue
+    }
+
+    const legacyValue = getStoredValue(legacyKey)
+    if (legacyValue.trim()) {
+        setStoredValue(storageKey, legacyValue)
+    }
+    return legacyValue
+}
+
+function getOrCreateStoredValueWithLegacy(storageKey: string, legacyKey: string, createValue: () => string) {
+    const currentValue = getStoredValue(storageKey)
+    if (currentValue.trim()) {
+        return currentValue
+    }
+
+    const legacyValue = getStoredValue(legacyKey)
+    if (legacyValue.trim()) {
+        setStoredValue(storageKey, legacyValue)
+        return legacyValue
+    }
+
+    return getOrCreateStoredValue(storageKey, createValue)
+}
 
 function buildSseLines(rawEvent: string) {
     const lines = rawEvent.split(/\r?\n/)
@@ -163,8 +277,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const apiBase = __API_BASE__ || import.meta.env.VITE_API_URL || ''
     const defaultGameSystemId = Number(import.meta.env.VITE_DEFAULT_GAME_SYSTEM_ID || '1') || 1
     const defaultFolderId = Number(import.meta.env.VITE_DEFAULT_FOLDER_ID || '1') || 1
-    const [token, setToken] = React.useState(() => getStoredValue('lexmechanicus.token'))
-    const [guestId] = React.useState(() => getOrCreateStoredValue('lexmechanicus.guestId', () => window.crypto.randomUUID()))
+    const [token, setToken] = React.useState(() => getStoredValueWithLegacy(TOKEN_STORAGE_KEY, LEGACY_TOKEN_STORAGE_KEY))
+    const [guestId] = React.useState(() => getOrCreateStoredValueWithLegacy(GUEST_ID_STORAGE_KEY, LEGACY_GUEST_ID_STORAGE_KEY, () => window.crypto.randomUUID()))
     const [session, setSession] = React.useState<SessionInfo | null>(null)
     const [sessionError, setSessionError] = React.useState('')
     const [activeGameSystem, setActiveGameSystemState] = React.useState<Ruleset | null>(null)
@@ -241,7 +355,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }, [refreshSession])
 
     const storeToken = React.useCallback((nextToken: string) => {
-        setStoredValue('lexmechanicus.token', nextToken)
+        setStoredValue(TOKEN_STORAGE_KEY, nextToken)
         setToken(nextToken)
     }, [])
 
@@ -297,10 +411,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         })
     }, [apiBase, authHeaders])
 
-    const uploadFile = React.useCallback(async (file: File, isPublic: boolean, title: string, description = '', rulesetId?: number | null, tagIds: number[] = []) => {
+    const uploadFile = React.useCallback(async (
+        file: File,
+        isPublic: boolean,
+        title: string,
+        description = '',
+        rulesetId?: number | null,
+        tagIds: number[] = [],
+        publicDistributionConfirmed = false,
+    ) => {
         const body = new FormData()
         body.append('folder_id', String(defaultFolderId))
         body.append('is_public', String(isPublic))
+        body.append('public_distribution_confirmed', String(publicDistributionConfirmed))
         body.append('title', title)
         body.append('description', description)
         body.append('tag_ids', JSON.stringify(tagIds))
@@ -349,6 +472,57 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         })
     }, [apiBase, authHeaders])
 
+    const getCopyrightStatus = React.useCallback(async (fileId: number) => {
+        return requestJson<CopyrightStatusPayload>(`${apiBase}/uploads/${fileId}/copyright-status`, {
+            headers: authHeaders(false),
+            operation: 'Load copyright status',
+            fallbackMessage: 'Unable to load copyright status.',
+        })
+    }, [apiBase, authHeaders])
+
+    const submitCopyrightTakedown = React.useCallback(async (fileId: number, input: CopyrightTakedownInput) => {
+        return requestJson<{ request_id: number, admin_notified: boolean }>(`${apiBase}/uploads/${fileId}/copyright-takedown`, {
+            method: 'POST',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                claimant_name: input.claimantName,
+                claimant_email: input.claimantEmail,
+                claimant_phone: input.claimantPhone,
+                claimant_address: input.claimantAddress,
+                copyright_owner_name: input.copyrightOwnerName || '',
+                work_description: input.workDescription,
+                material_location: input.materialLocation || '',
+                infringement_explanation: input.infringementExplanation,
+                signature: input.signature,
+                good_faith_statement_confirmed: input.goodFaithStatementConfirmed,
+                accuracy_statement_confirmed: input.accuracyStatementConfirmed,
+                authority_statement_confirmed: input.authorityStatementConfirmed,
+            }),
+            operation: 'Submit copyright takedown',
+            fallbackMessage: 'Unable to submit the copyright takedown request.',
+        })
+    }, [apiBase, authHeaders])
+
+    const submitCopyrightCounterNotice = React.useCallback(async (fileId: number, input: CopyrightCounterNoticeInput) => {
+        return requestJson<{ request_id: number, admin_notified: boolean }>(`${apiBase}/uploads/${fileId}/copyright-counter-notice`, {
+            method: 'POST',
+            headers: { ...authHeaders(false), 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                claimant_name: input.claimantName,
+                claimant_email: input.claimantEmail,
+                claimant_phone: input.claimantPhone,
+                claimant_address: input.claimantAddress,
+                counter_explanation: input.counterExplanation,
+                signature: input.signature,
+                mistake_statement_confirmed: input.mistakeStatementConfirmed,
+                perjury_statement_confirmed: input.perjuryStatementConfirmed,
+                jurisdiction_statement_confirmed: input.jurisdictionStatementConfirmed,
+            }),
+            operation: 'Submit copyright counter-notice',
+            fallbackMessage: 'Unable to submit the copyright counter-notice.',
+        })
+    }, [apiBase, authHeaders])
+
     const listBundles = React.useCallback(async (scope: BundleScope, query = '', rulesetId?: number) => {
         const params = new URLSearchParams({ scope, q: query, limit: '50' })
         if (typeof rulesetId === 'number') params.set('ruleset_id', String(rulesetId))
@@ -369,6 +543,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 ruleset_id: input.rulesetId,
                 file_ids: input.fileIds,
                 is_public: input.isPublic,
+                public_distribution_confirmed: input.publicDistributionConfirmed,
             }),
             operation: 'Create bundle',
             fallbackMessage: 'Unable to create the bundle.',
@@ -555,7 +730,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         applyGameSystems(payload.active_game_system, payload.available_game_systems, payload.active_bundle)
     }, [apiBase, applyGameSystems, authHeaders])
 
-    const streamAsk = React.useCallback(async (question: string, onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => {
+    const streamAsk = React.useCallback(async (question: string, history: ChatHistoryTurn[], onToken: (token: string) => void, onCitations?: (citations: ChatCitation[]) => void) => {
         if (!activeGameSystem?.id) {
             throw new ApiError('Choose a game system before chatting.', {
                 status: 422,
@@ -563,13 +738,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             })
         }
         const rulesetId = activeGameSystem.id
-        const params = new URLSearchParams({ q: question, ruleset_id: String(rulesetId) })
-        if (activeBundle?.id) params.set('bundle_id', String(activeBundle.id))
-        const url = `${apiBase}/ask/stream?${params.toString()}`
+        const url = `${apiBase}/ask/stream`
+        const body = {
+            q: question,
+            ruleset_id: rulesetId,
+            bundle_id: activeBundle?.id ?? null,
+            history,
+        }
         let response: Response
         try {
             response = await fetch(url, {
-                headers: { ...authHeaders(true), Accept: 'text/event-stream' },
+                method: 'POST',
+                headers: { ...authHeaders(true), Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
             })
         } catch (error) {
             const apiError = apiErrorFromPayload(null, 0, 'Unable to reach the server. Check your connection and try again.')
@@ -670,6 +851,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         deleteFile,
         saveFile,
         unsaveFile,
+        getCopyrightStatus,
+        submitCopyrightTakedown,
+        submitCopyrightCounterNotice,
         listBundles,
         getBundle,
         createBundle,
@@ -712,6 +896,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         deleteFile,
         saveFile,
         unsaveFile,
+        getCopyrightStatus,
+        submitCopyrightTakedown,
+        submitCopyrightCounterNotice,
         listBundles,
         getBundle,
         createBundle,

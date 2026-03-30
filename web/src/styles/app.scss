@@ -172,6 +172,41 @@ button {
   min-height: 0;
 }
 
+.template-footer {
+  border-top: 1px solid var(--border);
+  background: #fafafa;
+
+  &__inner {
+    max-width: 80rem;
+    margin: 0 auto;
+    padding: 0.9rem 1rem 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  &__links {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+
+    a {
+      color: var(--primary);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+  }
+}
+
 .sheet {
   position: fixed;
   inset: 0;
@@ -638,6 +673,12 @@ button {
     color: #166534;
   }
 
+  &--warning {
+    border-color: #fcd34d;
+    background: #fffbeb;
+    color: #92400e;
+  }
+
   & + & {
     margin-top: 0.75rem;
   }
@@ -849,6 +890,12 @@ button {
   min-height: 6.25rem;
   padding: 0.75rem 1rem;
   resize: vertical;
+}
+
+.inline-link {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 0.12rem;
 }
 
 .checkbox-row,
@@ -1091,6 +1138,35 @@ button {
   gap: 0.75rem;
   font-size: 0.75rem;
   min-width: 0;
+}
+
+.browse-card__takedown-link {
+  margin-top: 0.4rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.legal-card {
+  display: grid;
+  gap: 0.75rem;
+
+  h2 {
+    margin: 0;
+  }
+
+  p {
+    margin: 0;
+  }
 }
 
 .meta-dot {

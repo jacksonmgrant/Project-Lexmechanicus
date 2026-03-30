@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Send, X } from 'lucide-react'
-import { ChatCitation, useAppContext } from '../../context/AppContext'
+import { ChatCitation, ChatHistoryTurn, useAppContext } from '../../context/AppContext'
 import { apiErrorFromPayload, getErrorMessage, readResponsePayload } from '../../lib/api'
 import { ActiveGameSystemDropdown } from '../ActiveGameSystemDropdown'
 import { ActiveBundleDropdown } from '../ActiveBundleDropdown'
@@ -50,13 +50,24 @@ function renderAssistantMessage(content: string): React.ReactNode {
     return normalizeAssistantText(prepared)
 }
 
+function buildThreadHistory(messages: Message[]): ChatHistoryTurn[] {
+    return messages
+        .filter((message) => message.id !== '1')
+        .filter((message) => message.content.trim())
+        .slice(-6)
+        .map((message) => ({
+            role: message.role,
+            content: message.content,
+        }))
+}
+
 export function ChatPage() {
     const { activeBundle, activeGameSystem, apiBase, guestId, session, streamAsk, token } = useAppContext()
     const [messages, setMessages] = useState<Message[]>([
         {
             id: '1',
             role: 'assistant',
-            content: "Hello! Welcome to Lexmechanicus. Ask me anything about the files tied to your current game system.",
+            content: "Hello! Welcome to Cogitator. Ask me anything about the files tied to your current game system.",
             citations: [],
         },
     ])
@@ -148,6 +159,7 @@ export function ChatPage() {
             role: 'user',
             content: normalizedInput,
         }
+        const threadHistory = buildThreadHistory(messages)
 
         const assistantId = (Date.now() + 1).toString()
         let latestCitations: ChatCitation[] = []
@@ -159,6 +171,7 @@ export function ChatPage() {
         try {
             await streamAsk(
                 userMessage.content,
+                threadHistory,
                 (delta) => {
                     setMessages((prev) => {
                         const assistantMessage = prev.find((message) => message.id === assistantId)

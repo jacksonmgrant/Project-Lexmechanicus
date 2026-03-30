@@ -1,19 +1,37 @@
 from __future__ import annotations
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Bundle, BundleFile, Ruleset, SavedBundle, User, UserRulesetBundle
+from ..models import File as FileModel
 from .rulesets import serialize_ruleset
 
 
+def build_public_bundle_access_condition():
+    inaccessible_file_exists = (
+        select(BundleFile.bundle_id)
+        .join(FileModel, FileModel.id == BundleFile.file_id)
+        .where(
+            BundleFile.bundle_id == Bundle.id,
+            or_(
+                FileModel.is_public.is_(False),
+                FileModel.is_copyright_restricted.is_(True),
+            ),
+        )
+        .exists()
+    )
+    return and_(Bundle.is_public.is_(True), ~inaccessible_file_exists)
+
+
 def build_bundle_access_condition(*, user_id: int | None, include_public_for_authenticated: bool = True):
+    public_clause = build_public_bundle_access_condition()
     if user_id is None:
-        return Bundle.is_public.is_(True)
+        return public_clause
 
     access_clauses = [Bundle.owner_id == user_id]
     if include_public_for_authenticated:
-        access_clauses.insert(0, Bundle.is_public.is_(True))
+        access_clauses.insert(0, public_clause)
     return or_(*access_clauses)
 
 

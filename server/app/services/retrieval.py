@@ -33,19 +33,22 @@ WITH kw AS (
     WHERE ({SEARCH_VECTOR_SQL}) @@ websearch_to_tsquery('english', :query)
         AND f.ruleset_id = :ruleset_id
         AND (
-            (:user_id IS NULL AND f.is_public = TRUE)
+            (:user_id IS NULL AND f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
             OR (
                 :user_id IS NOT NULL AND (
-                    f.is_public = TRUE
+                    (f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
                     OR
                     fo.user_id = :user_id
-                    OR EXISTS (
+                    OR (
+                        COALESCE(f.is_copyright_restricted, FALSE) = FALSE
+                        AND EXISTS (
                         SELECT 1
                         FROM marketplace_packs mp
                         JOIN saved_packs sp ON sp.marketplace_pack_id = mp.id
                         WHERE
                             mp.folder_id = f.folder_id
                             AND sp.user_id = :user_id
+                    )
                     )
                 )
             )
@@ -72,19 +75,22 @@ WITH kw AS (
     WHERE ({SEARCH_VECTOR_SQL}) @@ to_tsquery('english', :fallback_query)
         AND f.ruleset_id = :ruleset_id
         AND (
-            (:user_id IS NULL AND f.is_public = TRUE)
+            (:user_id IS NULL AND f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
             OR (
                 :user_id IS NOT NULL AND (
-                    f.is_public = TRUE
+                    (f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
                     OR
                     fo.user_id = :user_id
-                    OR EXISTS (
+                    OR (
+                        COALESCE(f.is_copyright_restricted, FALSE) = FALSE
+                        AND EXISTS (
                         SELECT 1
                         FROM marketplace_packs mp
                         JOIN saved_packs sp ON sp.marketplace_pack_id = mp.id
                         WHERE
                             mp.folder_id = f.folder_id
                             AND sp.user_id = :user_id
+                    )
                     )
                 )
             )
@@ -115,22 +121,25 @@ WITH kw AS (
         AND b.id = :bundle_id
         AND b.ruleset_id = :ruleset_id
         AND (
-            (:user_id IS NULL AND b.is_public = TRUE AND f.is_public = TRUE)
+            (:user_id IS NULL AND b.is_public = TRUE AND f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
             OR (
                 :user_id IS NOT NULL AND (
                     b.owner_id = :user_id
                     OR b.is_public = TRUE
                 )
                 AND (
-                    f.is_public = TRUE
+                    (f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
                     OR fo.user_id = :user_id
-                    OR EXISTS (
+                    OR (
+                        COALESCE(f.is_copyright_restricted, FALSE) = FALSE
+                        AND EXISTS (
                         SELECT 1
                         FROM marketplace_packs mp
                         JOIN saved_packs sp ON sp.marketplace_pack_id = mp.id
                         WHERE
                             mp.folder_id = f.folder_id
                             AND sp.user_id = :user_id
+                    )
                     )
                 )
             )
@@ -161,22 +170,25 @@ WITH kw AS (
         AND b.id = :bundle_id
         AND b.ruleset_id = :ruleset_id
         AND (
-            (:user_id IS NULL AND b.is_public = TRUE AND f.is_public = TRUE)
+            (:user_id IS NULL AND b.is_public = TRUE AND f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
             OR (
                 :user_id IS NOT NULL AND (
                     b.owner_id = :user_id
                     OR b.is_public = TRUE
                 )
                 AND (
-                    f.is_public = TRUE
+                    (f.is_public = TRUE AND COALESCE(f.is_copyright_restricted, FALSE) = FALSE)
                     OR fo.user_id = :user_id
-                    OR EXISTS (
+                    OR (
+                        COALESCE(f.is_copyright_restricted, FALSE) = FALSE
+                        AND EXISTS (
                         SELECT 1
                         FROM marketplace_packs mp
                         JOIN saved_packs sp ON sp.marketplace_pack_id = mp.id
                         WHERE
                             mp.folder_id = f.folder_id
                             AND sp.user_id = :user_id
+                    )
                     )
                 )
             )

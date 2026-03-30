@@ -266,13 +266,21 @@ export function ManagePage() {
         }
     }
 
-    const handleCreateBundle = async (input: { title: string, description: string, fileIds: number[], isPublic: boolean, rulesetId: number }) => {
+    const handleCreateBundle = async (input: {
+        title: string
+        description: string
+        fileIds: number[]
+        isPublic: boolean
+        rulesetId: number
+        publicDistributionConfirmed: boolean
+    }) => {
         const bundle = await createBundle({
             title: input.title,
             description: input.description,
             fileIds: input.fileIds,
             isPublic: input.isPublic,
             rulesetId: input.rulesetId,
+            publicDistributionConfirmed: input.publicDistributionConfirmed,
         })
         setMyBundles((current) => [bundle, ...current])
         setSuccessMessage(`Created bundle "${bundle.title}".`)
@@ -577,7 +585,13 @@ export function ManagePage() {
                                                 <span className="meta-dot">•</span>
                                                 <span className={`status-badge${file.status === 'ready' ? ' is-primary' : ''}`}>{file.status === 'ready' ? 'Ready' : file.status}</span>
                                                 {file.is_public && <span className="status-badge status-badge--outline">Public</span>}
+                                                {file.is_copyright_restricted && <span className="status-badge status-badge--outline">Copyright Restricted</span>}
                                             </div>
+                                            {file.is_copyright_restricted && (
+                                                <Link className="browse-card__takedown-link" to={`/legal/copyright?file_id=${file.id}&mode=counter`}>
+                                                    Submit Counter-Notice
+                                                </Link>
+                                            )}
                                         </div>
                                     </article>
                                 ))
@@ -638,6 +652,7 @@ export function ManagePage() {
                                                     <span key={tag.id} className="tag-badge">{tag.name}</span>
                                                 ))}
                                                 <span className="tag-badge">{file.is_public ? 'Public' : 'Private'}</span>
+                                                {file.is_copyright_restricted && <span className="tag-badge">Copyright Restricted</span>}
                                                 <span className={`status-badge${file.status === 'ready' ? ' is-primary' : ''}`}>{file.status === 'ready' ? 'Ready' : file.status}</span>
                                             </div>
 

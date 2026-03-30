@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, File, Plus, Upload, X } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAppContext, type Ruleset, type Tag } from '../../context/AppContext'
 import { getErrorMessage } from '../../lib/api'
 import { GameSystemMenu } from '../tags/GameSystemMenu'
@@ -37,6 +37,7 @@ export function UploadPage() {
     const [bundleDescription, setBundleDescription] = useState('')
     const [createBundleFromUploads, setCreateBundleFromUploads] = useState(false)
     const [isPublic, setIsPublic] = useState(false)
+    const [publicDistributionConfirmed, setPublicDistributionConfirmed] = useState(false)
     const [selectedTags, setSelectedTags] = useState<Tag[]>([])
     const [selectedGameSystem, setSelectedGameSystem] = useState<Ruleset | null>(activeGameSystem)
     const [isSubmitting, setIsSubmitting] = useState(false)
@@ -201,6 +202,11 @@ export function UploadPage() {
             setError('Enter a bundle title before uploading.')
             return
         }
+        if (isPublic && !publicDistributionConfirmed) {
+            setFileFailures([])
+            setError('Confirm that you have the right to distribute the material before making it public.')
+            return
+        }
 
         setError('')
         setFileFailures([])
@@ -218,6 +224,7 @@ export function UploadPage() {
                     normalizedSharedDescription,
                     selectedGameSystem.id,
                     selectedTags.map((tag) => tag.id),
+                    publicDistributionConfirmed,
                 )
                 uploadedFileIds.push(result.file_id)
                 setFiles((prev) => prev.map((item) => (item.id === file.id ? { ...item, status: 'complete' } : item)))
@@ -244,6 +251,7 @@ export function UploadPage() {
                     rulesetId: selectedGameSystem.id,
                     fileIds: uploadedFileIds,
                     isPublic,
+                    publicDistributionConfirmed,
                 })
             } catch (err) {
                 setError(getErrorMessage(err, 'Files uploaded, but the bundle could not be created. You can create it later from Manage Bundles.'))
@@ -263,6 +271,7 @@ export function UploadPage() {
         setBundleDescription('')
         setCreateBundleFromUploads(false)
         setIsPublic(false)
+        setPublicDistributionConfirmed(false)
         setSelectedTags([])
         setSelectedGameSystem(activeGameSystem || selectedGameSystem)
         setFileFailures([])
@@ -462,18 +471,50 @@ export function UploadPage() {
                                 <p className="field-help">Selected tags are applied to every uploaded file in this batch.</p>
                             </div>
 
+                            <div className="notice" role="note">
+                                <p>
+                                    Only upload material you own, are licensed to use, or otherwise have a legal right to store. Public files must also be lawful to distribute. See the <Link className="inline-link" to="/legal/terms">Terms</Link> and <Link className="inline-link" to="/legal/copyright">Copyright Policy</Link>.
+                                </p>
+                            </div>
+
+                            {isPublic && (
+                                <div className="notice notice--error" role="alert">
+                                    <p>
+                                        Public uploads are discoverable by other users and are subject to DMCA takedown and repeat-infringer enforcement.
+                                    </p>
+                                </div>
+                            )}
+
                             <div className="checkbox-row">
                                 <input
                                     type="checkbox"
                                     id="public"
                                     checked={isPublic}
-                                    onChange={(event) => setIsPublic(event.target.checked)}
+                                    onChange={(event) => {
+                                        setIsPublic(event.target.checked)
+                                        if (!event.target.checked) {
+                                            setPublicDistributionConfirmed(false)
+                                        }
+                                    }}
                                     className="checkbox-input"
                                 />
                                 <label htmlFor="public">
                                     Make uploaded files {shouldCreateBundle ? 'and the new bundle ' : ''}publicly browsable
                                 </label>
                             </div>
+
+                            {isPublic && (
+                                <label className="checkbox-row" htmlFor="public-distribution-confirmed">
+                                    <input
+                                        type="checkbox"
+                                        id="public-distribution-confirmed"
+                                        checked={publicDistributionConfirmed}
+                                        onChange={(event) => setPublicDistributionConfirmed(event.target.checked)}
+                                        className="checkbox-input"
+                                    />
+                                    <span>I have the legal right to distribute every file in this public upload.</span>
+                                </label>
+                            )}
                         </div>
                     </section>
 

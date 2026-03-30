@@ -4,7 +4,15 @@ from pydantic import BaseModel, Field, validator
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..auth import authenticate_user, create_user, encode_jwt, get_current_user, get_optional_user, hash_password, verify_password
+from ..auth import (
+    authenticate_user,
+    create_user,
+    encode_jwt,
+    get_current_user,
+    get_optional_user_including_suspended,
+    hash_password,
+    verify_password,
+)
 from ..db import SessionLocal
 from ..errors import raise_api_error
 from ..models import User
@@ -61,6 +69,10 @@ def serialize_user(user: User):
         "id": user.id,
         "email": user.email,
         "display_name": user.display_name,
+        "dmca_strike_count": user.dmca_strike_count or 0,
+        "account_status": "suspended" if user.dmca_suspended_at else "active",
+        "dmca_suspended_at": user.dmca_suspended_at.isoformat() if user.dmca_suspended_at else None,
+        "dmca_suspension_reason": user.dmca_suspension_reason,
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
@@ -144,7 +156,7 @@ async def login(body: AuthRequest):
 
 
 @router.get("/me")
-async def me(request: Request, user=Depends(get_optional_user)):
+async def me(request: Request, user=Depends(get_optional_user_including_suspended)):
     return await _build_session_payload(request, user)
 
 

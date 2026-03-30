@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Bell, Database, Key, User } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { useAppContext } from '../../context/AppContext'
 import { getErrorMessage } from '../../lib/api'
 
@@ -197,6 +198,12 @@ export function AccountPage() {
                 </div>
 
                 <div className="page-section-stack">
+                    {session?.user?.account_status === 'suspended' && (
+                        <div className="notice notice--warning" role="alert">
+                            <p>{session.user.dmca_suspension_reason || 'This account is suspended under the repeat copyright infringer policy.'}</p>
+                        </div>
+                    )}
+
                     {!session?.authenticated && (
                         <section className="surface-card">
                             <div className="section-header">
@@ -237,6 +244,11 @@ export function AccountPage() {
                                         {mode === 'login' ? 'Need an account?' : 'Already have an account?'}
                                     </button>
                                 </div>
+                                {mode === 'signup' && (
+                                    <p className="field-help">
+                                        By creating an account, you agree to the <Link className="inline-link" to="/legal/terms">Terms</Link> and understand the <Link className="inline-link" to="/legal/copyright">Copyright Policy</Link>.
+                                    </p>
+                                )}
                             </div>
                         </section>
                     )}

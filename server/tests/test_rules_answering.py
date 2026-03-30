@@ -106,6 +106,28 @@ class RulesAnsweringTests(unittest.TestCase):
         self.assertIn("Context excerpt: Benefit of Cover", brief)
         self.assertIn("Answer expectations:", brief)
 
+    def test_context_brief_includes_recent_conversation(self):
+        brief = _build_context_brief(
+            "What about in ruins?",
+            [
+                {
+                    "source_title": "Warhammer 40,000 Core Rules",
+                    "section": "Terrain Features",
+                    "excerpt": "Ruins can grant the Benefit of Cover to models obscured by terrain.",
+                    "key_quote": "Ruins can grant the Benefit of Cover to models obscured by terrain.",
+                    "filename": "core_rules.pdf",
+                }
+            ],
+            [
+                {"role": "user", "content": "What is the benefit of cover?"},
+                {"role": "assistant", "content": "It adds 1 to armour saving throws against ranged attacks [[c0]]."},
+            ],
+        )
+
+        self.assertIn("Recent conversation:", brief)
+        self.assertIn("User: What is the benefit of cover?", brief)
+        self.assertIn("Assistant: It adds 1 to armour saving throws", brief)
+
     def test_estimate_retrieval_quality_averages_top_chunks(self):
         quality = estimate_retrieval_quality(
             [
