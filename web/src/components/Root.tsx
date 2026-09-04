@@ -23,7 +23,7 @@ export function Root() {
         <div className="template-shell">
             <div className="template-mobile-header">
                 <div className="template-brand-cluster">
-                    <h1 className="template-brand-title">Cogitator</h1>
+                    <h1 className="template-brand-title">RuleFinder</h1>
                 </div>
                 <button className="icon-button icon-button--ghost" type="button" onClick={() => setOpen(true)} aria-label="Open menu">
                     <Menu size={20} />
@@ -66,7 +66,7 @@ export function Root() {
             <div className="template-desktop-header">
                 <div className="template-desktop-header__inner">
                     <div className="template-brand-cluster">
-                        <h1 className="template-brand-title">Cogitator</h1>
+                        <h1 className="template-brand-title">RuleFinder</h1>
                     </div>
                     <nav className="template-desktop-nav">
                         {navigation.map((item) => {

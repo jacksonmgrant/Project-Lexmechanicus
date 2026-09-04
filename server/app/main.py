@@ -12,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
+from .config import settings
 from .db import DATABASE_URL
 from .errors import http_exception_handler, request_validation_exception_handler, unhandled_exception_handler
 from .routers import ask, auth, legal, search, uploads, viewer
@@ -32,8 +33,8 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Cogitator", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="RuleFinder", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)

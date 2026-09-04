@@ -67,7 +67,7 @@ export function ChatPage() {
         {
             id: '1',
             role: 'assistant',
-            content: "Hello! Welcome to Cogitator. Ask me anything about the files tied to your current game system.",
+            content: "Hello! Welcome to RuleFinder. Ask me anything about the files tied to your current game system.",
             citations: [],
         },
     ])

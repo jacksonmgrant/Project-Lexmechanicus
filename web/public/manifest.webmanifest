@@ -1,6 +1,6 @@
 {
-    "name": "Rules Lookup",
-    "short_name": "Rules",
+    "name": "RuleFinder",
+    "short_name": "RuleFinder",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#ffffff",

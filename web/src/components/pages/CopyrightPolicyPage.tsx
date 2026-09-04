@@ -365,7 +365,7 @@ export function CopyrightPolicyPage() {
 
                     <section className="surface-card legal-card">
                         <h2>Designated DMCA Agent</h2>
-                        <p>{legalInfo?.dmca_agent.organization || legalInfo?.service_provider.legal_name || 'Cogitator'}</p>
+                        <p>{legalInfo?.dmca_agent.organization || legalInfo?.service_provider.legal_name || 'RuleFinder'}</p>
                         {legalInfo?.dmca_agent.name && <p>{legalInfo.dmca_agent.name}</p>}
                         {legalInfo?.dmca_agent.email && <p>Email: <a className="inline-link" href={`mailto:${legalInfo.dmca_agent.email}`}>{legalInfo.dmca_agent.email}</a></p>}
                         {legalInfo?.dmca_agent.phone && <p>Phone: {legalInfo.dmca_agent.phone}</p>}

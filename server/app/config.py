@@ -50,7 +50,7 @@ class Settings:
     GPT5_FULL_MODEL = os.getenv("GPT5_FULL_MODEL", "gpt-5")
     EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "text-embedding-3-small")
     OPENAI_VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID")
-    OPENAI_AGENT_NAME = os.getenv("OPENAI_AGENT_NAME", "Cogitator Rules Agent")
+    OPENAI_AGENT_NAME = os.getenv("OPENAI_AGENT_NAME", "RuleFinder Rules Agent")
     OPENAI_VECTOR_STORE_AUTO_SYNC = _env_bool("OPENAI_VECTOR_STORE_AUTO_SYNC", False)
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     ADSENSE_CLIENT = os.getenv("ADSENSE_CLIENT")
@@ -72,7 +72,8 @@ class Settings:
     ADMIN_TAKEDOWN_EMAILS = _env_csv("ADMIN_TAKEDOWN_EMAILS")
     ADMIN_REVIEW_TOKEN = _clean_env_value(os.getenv("ADMIN_REVIEW_TOKEN"))
     PUBLIC_APP_URL = _clean_env_value(os.getenv("PUBLIC_APP_URL"))
-    SERVICE_PROVIDER_LEGAL_NAME = _clean_env_value(os.getenv("SERVICE_PROVIDER_LEGAL_NAME")) or "Cogitator"
+    CORS_ORIGINS = _env_csv("CORS_ORIGINS") or ["http://localhost:4269"]
+    SERVICE_PROVIDER_LEGAL_NAME = _clean_env_value(os.getenv("SERVICE_PROVIDER_LEGAL_NAME")) or "RuleFinder"
     SERVICE_PROVIDER_ADDRESS = _clean_env_value(os.getenv("SERVICE_PROVIDER_ADDRESS"))
     SERVICE_PROVIDER_ALT_NAMES = _env_csv("SERVICE_PROVIDER_ALT_NAMES")
     DMCA_DESIGNATED_AGENT_NAME = _clean_env_value(os.getenv("DMCA_DESIGNATED_AGENT_NAME"))

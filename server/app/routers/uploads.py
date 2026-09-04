@@ -818,7 +818,7 @@ def _build_counter_notice_email_body(
 def _build_account_suspension_email_body(*, user: User) -> str:
     return "\n".join(
         [
-            "Your Cogitator account has been suspended under the repeat copyright infringer policy.",
+            "Your RuleFinder account has been suspended under the repeat copyright infringer policy.",
             "",
             f"Account: {user.email}",
             f"Approved DMCA notices counted: {int(user.dmca_strike_count or 0)}",
@@ -1350,7 +1350,7 @@ async def request_copyright_takedown(
     try:
         await send_plain_email(
             recipients=settings.ADMIN_TAKEDOWN_EMAILS,
-            subject=f"[Cogitator] DMCA notice #{takedown.id} for file #{file_model.id}",
+            subject=f"[RuleFinder] DMCA notice #{takedown.id} for file #{file_model.id}",
             body=_build_takedown_email_body(
                 request=request,
                 takedown=takedown,
@@ -1429,7 +1429,7 @@ async def submit_copyright_counter_notice(
     try:
         await send_plain_email(
             recipients=settings.ADMIN_TAKEDOWN_EMAILS,
-            subject=f"[Cogitator] Counter-notice submitted for DMCA notice #{takedown.id}",
+            subject=f"[RuleFinder] Counter-notice submitted for DMCA notice #{takedown.id}",
             body="\n".join(
                 [
                     "A DMCA counter-notice has been submitted and is awaiting review.",
@@ -1615,7 +1615,7 @@ async def approve_copyright_takedown(
     try:
         await send_plain_email(
             recipients=[owner.email],
-            subject=f"[Cogitator] File disabled after DMCA notice #{takedown.id}",
+            subject=f"[RuleFinder] File disabled after DMCA notice #{takedown.id}",
             body=_build_uploader_takedown_email_body(
                 request=request,
                 takedown=takedown,
@@ -1640,7 +1640,7 @@ async def approve_copyright_takedown(
         try:
             await send_plain_email(
                 recipients=[owner.email],
-                subject="[Cogitator] Account suspended under repeat infringer policy",
+                subject="[RuleFinder] Account suspended under repeat infringer policy",
                 body=_build_account_suspension_email_body(user=owner),
             )
             suspension_notified = True
@@ -1749,7 +1749,7 @@ async def accept_copyright_counter_notice(
 
             await send_plain_email(
                 recipients=[takedown.claimant_email],
-                subject=f"[Cogitator] Counter-notice forwarded for DMCA notice #{takedown.id}",
+                subject=f"[RuleFinder] Counter-notice forwarded for DMCA notice #{takedown.id}",
                 body=_build_counter_notice_email_body(
                     request=request,
                     takedown=takedown,

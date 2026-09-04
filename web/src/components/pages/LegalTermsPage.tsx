@@ -46,7 +46,7 @@ export function LegalTermsPage() {
             <div className="page-container page-container--narrow">
                 <div className="page-header">
                     <h1>Terms of Use</h1>
-                    <p>These terms explain the publishing rules and copyright expectations for Cogitator.</p>
+                    <p>These terms explain the publishing rules and copyright expectations for RuleFinder.</p>
                 </div>
 
                 {error && (
@@ -70,7 +70,7 @@ export function LegalTermsPage() {
 
                     <section className="surface-card legal-card">
                         <h2>Copyright Policy</h2>
-                        <p>Cogitator responds to DMCA notices and counter-notices for public content hosted through the service.</p>
+                        <p>RuleFinder responds to DMCA notices and counter-notices for public content hosted through the service.</p>
                         <p>Use the <Link className="inline-link" to="/legal/copyright">Copyright Policy</Link> page to submit a formal notice, review the required statements, and learn how counter-notices are handled.</p>
                     </section>
 
@@ -82,7 +82,7 @@ export function LegalTermsPage() {
 
                     <section className="surface-card legal-card">
                         <h2>Service Provider</h2>
-                        <p>{legalInfo?.service_provider.legal_name || 'Cogitator'}</p>
+                        <p>{legalInfo?.service_provider.legal_name || 'RuleFinder'}</p>
                         {legalInfo?.service_provider.address && <p>{legalInfo.service_provider.address}</p>}
                         {!!legalInfo?.service_provider.alternate_names.length && (
                             <p>Alternate names: {legalInfo.service_provider.alternate_names.join(', ')}</p>

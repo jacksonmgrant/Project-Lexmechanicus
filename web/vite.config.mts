@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
     return {
         envDir: '..',
         define: {
-            __API_BASE__: JSON.stringify(apiTarget),
+            __API_BASE__: JSON.stringify(env.VITE_API_URL || ''),
         },
         plugins: [react()],
         css: {

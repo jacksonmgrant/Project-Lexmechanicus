@@ -1,0 +1,14 @@
+{$DOMAIN:rulefinder.app}, www.{$DOMAIN:rulefinder.app} {
+    encode zstd gzip
+
+    @api path /auth/* /ask/* /legal/* /search/* /uploads/* /viewer/* /health /robots.txt
+    handle @api {
+        reverse_proxy api:8765
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}

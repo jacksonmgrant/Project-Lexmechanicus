@@ -225,34 +225,39 @@ type AppContextValue = {
 
 const AppContext = React.createContext<AppContextValue | null>(null)
 
-const TOKEN_STORAGE_KEY = 'cogitator.token'
-const LEGACY_TOKEN_STORAGE_KEY = 'lexmechanicus.token'
-const GUEST_ID_STORAGE_KEY = 'cogitator.guestId'
-const LEGACY_GUEST_ID_STORAGE_KEY = 'lexmechanicus.guestId'
+const TOKEN_STORAGE_KEY = 'rulefinder.token'
+const LEGACY_TOKEN_STORAGE_KEYS = ['cogitator.token', 'lexmechanicus.token']
+const GUEST_ID_STORAGE_KEY = 'rulefinder.guestId'
+const LEGACY_GUEST_ID_STORAGE_KEYS = ['cogitator.guestId', 'lexmechanicus.guestId']
 
-function getStoredValueWithLegacy(storageKey: string, legacyKey: string) {
+function getStoredValueWithLegacy(storageKey: string, legacyKeys: string[]) {
     const currentValue = getStoredValue(storageKey)
     if (currentValue.trim()) {
         return currentValue
     }
 
-    const legacyValue = getStoredValue(legacyKey)
-    if (legacyValue.trim()) {
-        setStoredValue(storageKey, legacyValue)
+    for (const legacyKey of legacyKeys) {
+        const legacyValue = getStoredValue(legacyKey)
+        if (legacyValue.trim()) {
+            setStoredValue(storageKey, legacyValue)
+            return legacyValue
+        }
     }
-    return legacyValue
+    return ''
 }
 
-function getOrCreateStoredValueWithLegacy(storageKey: string, legacyKey: string, createValue: () => string) {
+function getOrCreateStoredValueWithLegacy(storageKey: string, legacyKeys: string[], createValue: () => string) {
     const currentValue = getStoredValue(storageKey)
     if (currentValue.trim()) {
         return currentValue
     }
 
-    const legacyValue = getStoredValue(legacyKey)
-    if (legacyValue.trim()) {
-        setStoredValue(storageKey, legacyValue)
-        return legacyValue
+    for (const legacyKey of legacyKeys) {
+        const legacyValue = getStoredValue(legacyKey)
+        if (legacyValue.trim()) {
+            setStoredValue(storageKey, legacyValue)
+            return legacyValue
+        }
     }
 
     return getOrCreateStoredValue(storageKey, createValue)
@@ -277,8 +282,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const apiBase = __API_BASE__ || import.meta.env.VITE_API_URL || ''
     const defaultGameSystemId = Number(import.meta.env.VITE_DEFAULT_GAME_SYSTEM_ID || '1') || 1
     const defaultFolderId = Number(import.meta.env.VITE_DEFAULT_FOLDER_ID || '1') || 1
-    const [token, setToken] = React.useState(() => getStoredValueWithLegacy(TOKEN_STORAGE_KEY, LEGACY_TOKEN_STORAGE_KEY))
-    const [guestId] = React.useState(() => getOrCreateStoredValueWithLegacy(GUEST_ID_STORAGE_KEY, LEGACY_GUEST_ID_STORAGE_KEY, () => window.crypto.randomUUID()))
+    const [token, setToken] = React.useState(() => getStoredValueWithLegacy(TOKEN_STORAGE_KEY, LEGACY_TOKEN_STORAGE_KEYS))
+    const [guestId] = React.useState(() => getOrCreateStoredValueWithLegacy(GUEST_ID_STORAGE_KEY, LEGACY_GUEST_ID_STORAGE_KEYS, () => window.crypto.randomUUID()))
     const [session, setSession] = React.useState<SessionInfo | null>(null)
     const [sessionError, setSessionError] = React.useState('')
     const [activeGameSystem, setActiveGameSystemState] = React.useState<Ruleset | null>(null)

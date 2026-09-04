@@ -1,6 +1,6 @@
 # Knowledge Workspace
 
-This folder is the local staging area for documents you want to use with Cogitator uploads and optional OpenAI `file_search`.
+This folder is the local staging area for documents you want to use with RuleFinder uploads and optional OpenAI `file_search`.
 
 Suggested layout:
 

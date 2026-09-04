@@ -1,8 +1,10 @@
-# Project Cogitator
+# RuleFinder
 
-Cogitator is a FastAPI + React application for searching and querying user-uploaded rules packs. Files are uploaded to S3-compatible storage, normalized into searchable chunks, embedded for later reranking, and then surfaced through keyword search or an SSE-backed answer stream.
+RuleFinder is a FastAPI + React application for searching and querying user-uploaded rules packs. Files are uploaded to S3-compatible storage, normalized into searchable chunks, embedded for later reranking, and then surfaced through keyword search or an SSE-backed answer stream. LexMechanicus remains the internal project codename.
 
 > Unofficial fan tool. Not affiliated with any game publisher. Users may only upload material they have the rights to share.
+
+For the production deployment at `rulefinder.app`, see [the hosting guide](docs/hosting-rulefinder.md).
 
 ## Stack
 
